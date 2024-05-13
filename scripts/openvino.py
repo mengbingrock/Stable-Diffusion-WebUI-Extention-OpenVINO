@@ -133,7 +133,7 @@ partitioned_modules = {}
 
 @register_backend
 @fake_tensor_unsupported
-def openvino_fx(subgraph, example_inputs):
+def openvino_fx_ext(subgraph, example_inputs):
     try:
         executor_parameters = None
         inputs_reversed = False
@@ -600,7 +600,7 @@ def get_diffusers_sd_model(model_config, vae_ckpt, sampler_name, enable_caching,
                         cn_model_path = cn_model_path + '.pth'
                     controlnet = ControlNetModel.from_single_file(cn_model_path, local_files_only=True)
                 sd_model = StableDiffusionControlNetPipeline(**sd_model.components, controlnet=controlnet)
-                sd_model.controlnet = torch.compile(sd_model.controlnet, backend="openvino_fx")
+                sd_model.controlnet = torch.compile(sd_model.controlnet, backend="openvino_fx_ext")
         else:
             if model_config != "None":
                 local_config_file = os.path.join(curr_dir_path, 'configs', model_config)
@@ -636,7 +636,7 @@ def get_diffusers_sd_model(model_config, vae_ckpt, sampler_name, enable_caching,
                         cn_model_path = cn_model_path + '.pth'
                     controlnet = ControlNetModel.from_single_file(cn_model_path, local_files_only=True)
                 sd_model = StableDiffusionControlNetPipeline(**sd_model.components, controlnet=controlnet)
-                sd_model.controlnet = torch.compile(sd_model.controlnet, backend="openvino_fx")
+                sd_model.controlnet = torch.compile(sd_model.controlnet, backend="openvino_fx_ext")
 
         #load lora
 
@@ -652,17 +652,17 @@ def get_diffusers_sd_model(model_config, vae_ckpt, sampler_name, enable_caching,
         sd_model.safety_checker = None
         sd_model.cond_stage_key = functools.partial(cond_stage_key, shared.sd_model)
         sd_model.scheduler = set_scheduler(sd_model, sampler_name)
-        sd_model.unet = torch.compile(sd_model.unet, backend="openvino_fx")
+        sd_model.unet = torch.compile(sd_model.unet, backend="openvino_fx_ext")
         ## VAE
         if vae_ckpt == "Disable-VAE-Acceleration":
             sd_model.vae.decode = sd_model.vae.decode
         elif vae_ckpt == "None":
-            sd_model.vae.decode = torch.compile(sd_model.vae.decode, backend="openvino_fx")
+            sd_model.vae.decode = torch.compile(sd_model.vae.decode, backend="openvino_fx_ext")
         else:
             vae_path = os.path.join(curr_dir_path, 'models', 'VAE', vae_ckpt)
             print("OpenVINO Script:  loading vae from : " + vae_path)
             sd_model.vae = AutoencoderKL.from_single_file(vae_path, local_files_only=True)
-            sd_model.vae.decode = torch.compile(sd_model.vae.decode, backend="openvino_fx")
+            sd_model.vae.decode = torch.compile(sd_model.vae.decode, backend="openvino_fx_ext")
         shared.sd_diffusers_model = sd_model
         del sd_model
     return shared.sd_diffusers_model
@@ -679,17 +679,17 @@ def get_diffusers_sd_refiner_model(model_config, vae_ckpt, sampler_name, enable_
             refiner_model.watermark = NoWatermark()
             refiner_model.sd_checkpoint_info = refiner_checkpoint_info
             refiner_model.sd_model_hash = refiner_checkpoint_info.calculate_shorthash()
-            refiner_model.unet = torch.compile(refiner_model.unet,  backend="openvino_fx")
+            refiner_model.unet = torch.compile(refiner_model.unet,  backend="openvino_fx_ext")
             ## VAE
             if vae_ckpt == "Disable-VAE-Acceleration":
                 refiner_model.vae.decode = refiner_model.vae.decode
             elif vae_ckpt == "None":
-                refiner_model.vae.decode = torch.compile(refiner_model.vae.decode, backend="openvino_fx")
+                refiner_model.vae.decode = torch.compile(refiner_model.vae.decode, backend="openvino_fx_ext")
             else:
                 vae_path = os.path.join(curr_dir_path, 'models', 'VAE', vae_ckpt)
                 print("OpenVINO Script:  loading vae from : " + vae_path)
                 refiner_model.vae = AutoencoderKL.from_single_file(vae_path, local_files_only=True)
-                refiner_model.vae.decode = torch.compile(refiner_model.vae.decode, backend="openvino_fx")
+                refiner_model.vae.decode = torch.compile(refiner_model.vae.decode, backend="openvino_fx_ext")
             shared.sd_refiner_model = refiner_model
         del refiner_model
     return shared.sd_refiner_model
@@ -1158,7 +1158,7 @@ def on_change(mode):
 
 class Script(scripts.Script):
     def title(self):
-        return "Accelerate with OpenVINO"
+        return "Accelerate with OpenVINO from Extention format(NEW)"
 
     def show(self, is_img2img):
         return True

@@ -83,9 +83,7 @@ def install():
 
     if not launch.is_installed("diffusers"):
         launch.run_pip(
-            "install diffusers>=0.23.0",
-            "diffusers",
-            live=True,
+            "install diffusers>=0.23.0", "diffusers", live=True,
         )
 
     xformers_package = os.environ.get('XFORMERS_PACKAGE', 'xformers==0.0.20')
@@ -127,10 +125,12 @@ def install():
 
     #
     if not launch.is_installed("lpips"):
-        print("Polygraphy is not installed! Installing...")
+        print("CodeFormer is not installed! Installing...")
         launch.run_pip(
             f"install -r \"{os.path.join(repo_dir('CodeFormer'), 'requirements.txt')}\"", "requirements for CodeFormer"
         )
+    
+    print("OpenVINO extension install complete")
 
 
 install()
