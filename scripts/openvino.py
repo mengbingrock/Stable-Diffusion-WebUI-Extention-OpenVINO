@@ -1170,7 +1170,7 @@ def on_change(mode):
 
 class Script(scripts.Script):
     def title(self):
-        return "Accelerate with OpenVINO"
+        return "Accelerate with OpenVINO Extension"
 
     def show(self, is_img2img):
         return True
