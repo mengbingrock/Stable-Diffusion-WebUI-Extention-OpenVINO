@@ -85,6 +85,9 @@ def install():
         launch.run_pip(
             "install diffusers>=0.23.0", "diffusers", live=True,
         )
+    launch.run_pip(
+            "install diffusers>=0.27.0", "diffusers", live=True,
+        )
 
     xformers_package = os.environ.get('XFORMERS_PACKAGE', 'xformers==0.0.20')
     clip_package = os.environ.get('CLIP_PACKAGE', "https://github.com/openai/CLIP/archive/d50d76daa670286dd6cacf3bcd80b5e4823fc8e1.zip")
