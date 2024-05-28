@@ -45,6 +45,7 @@ from torch.utils._pytree import tree_flatten
 from hashlib import sha256
 
 from diffusers import (
+    LCMScheduler,
     StableDiffusionPipeline,
     StableDiffusionImg2ImgPipeline,
     StableDiffusionInpaintPipeline,
@@ -56,6 +57,7 @@ from diffusers import (
     StableDiffusionLatentUpscalePipeline,
     DDIMScheduler,
     DPMSolverMultistepScheduler,
+    DPMSolverSinglestepScheduler,
     EulerAncestralDiscreteScheduler,
     EulerDiscreteScheduler,
     HeunDiscreteScheduler,
@@ -133,7 +135,7 @@ partitioned_modules = {}
 
 @register_backend
 @fake_tensor_unsupported
-def openvino_fx_ext(subgraph, example_inputs):
+def openvino_fx(subgraph, example_inputs):
     try:
         executor_parameters = None
         inputs_reversed = False
@@ -215,8 +217,8 @@ def openvino_fx_ext(subgraph, example_inputs):
                 node.target = torch.ops.aten.mul.Tensor
         with torch.no_grad():
             model.eval()
-        partitioner = Partitioner()
-        compiled_model = partitioner.make_partitions(model)
+        partitioner = Partitioner(None)
+        compiled_model = partitioner.make_partitions(model, None)
 
         if executor_parameters is not None and 'model_hash_str' in executor_parameters:
             # Check if the model is fully supported.
@@ -508,22 +510,32 @@ shared.sd_diffusers_model = sd_diffusers_model
 shared.sd_refiner_model = None
 
 def set_scheduler(sd_model, sampler_name):
-    if (sampler_name == "Euler a"):
-        sd_model.scheduler = EulerAncestralDiscreteScheduler.from_config(sd_model.scheduler.config)
-    elif (sampler_name == "Euler"):
-        sd_model.scheduler = EulerDiscreteScheduler.from_config(sd_model.scheduler.config)
-    elif (sampler_name == "LMS"):
-        sd_model.scheduler = LMSDiscreteScheduler.from_config(sd_model.scheduler.config)
-    elif (sampler_name == "Heun"):
-        sd_model.scheduler = HeunDiscreteScheduler.from_config(sd_model.scheduler.config)
-    elif (sampler_name == "DPM++ 2M"):
+    if   (sampler_name == "DPM++ 2M"):
         sd_model.scheduler = DPMSolverMultistepScheduler.from_config(sd_model.scheduler.config, algorithm_type="dpmsolver++", use_karras_sigmas=False)
-    elif (sampler_name == "LMS Karras"):
-        sd_model.scheduler = LMSDiscreteScheduler.from_config(sd_model.scheduler.config, use_karras_sigmas=True)
     elif (sampler_name == "DPM++ 2M Karras"):
         sd_model.scheduler = DPMSolverMultistepScheduler.from_config(sd_model.scheduler.config, algorithm_type="dpmsolver++", use_karras_sigmas=True)
+    elif (sampler_name == "DPM++ 2M SDE"):
+        sd_model.scheduler = DPMSolverMultistepScheduler.from_config(sd_model.scheduler.config, algorithm_type="sde-dpmsolver++")
+    elif (sampler_name == "DPM++ 2M SDE Karras"):
+        sd_model.scheduler = DPMSolverMultistepScheduler.from_config(sd_model.scheduler.config, algorithm_type="sde-dpmsolver++", use_karras_sigmas=True)
+    elif (sampler_name == "DPM++ SDE"):
+        sd_model.scheduler = DPMSolverSinglestepScheduler.from_config(sd_model.scheduler.config, algorithm_type="dpmsolver++")
+    elif (sampler_name == "DPM++ SDE Karras"):
+        sd_model.scheduler = DPMSolverSinglestepScheduler.from_config(sd_model.scheduler.config, algorithm_type="dpmsolver++", use_karras_sigmas=True)
     elif (sampler_name == "DDIM"):
         sd_model.scheduler = DDIMScheduler.from_config(sd_model.scheduler.config)
+    elif (sampler_name == "Euler"):
+        sd_model.scheduler = EulerDiscreteScheduler.from_config(sd_model.scheduler.config)
+    elif (sampler_name == "Euler a"):
+        sd_model.scheduler = EulerAncestralDiscreteScheduler.from_config(sd_model.scheduler.config)
+    elif (sampler_name == "Heun"):
+        sd_model.scheduler = HeunDiscreteScheduler.from_config(sd_model.scheduler.config)
+    elif (sampler_name == "LCM"):
+        sd_model.scheduler = LCMScheduler.from_config(sd_model.scheduler.config)
+    elif (sampler_name == "LMS"):
+        sd_model.scheduler = LMSDiscreteScheduler.from_config(sd_model.scheduler.config)
+    elif (sampler_name == "LMS Karras"):
+        sd_model.scheduler = LMSDiscreteScheduler.from_config(sd_model.scheduler.config, use_karras_sigmas=True)
     elif (sampler_name == "PLMS"):
         sd_model.scheduler = PNDMScheduler.from_config(sd_model.scheduler.config)
     else:
@@ -580,7 +592,7 @@ def get_diffusers_sd_model(model_config, vae_ckpt, sampler_name, enable_caching,
                 if (len(model_state.control_models) > 1):
                     controlnet = []
                     for cn_model in model_state.control_models:
-                        cn_model_dir_path = os.path.join(curr_dir_path, 'extensions', 'sd-webui-controlnet', 'models')
+                        cn_model_dir_path = os.path.join(curr_dir_path,'models', 'ControlNet')
                         cn_model_path = os.path.join(cn_model_dir_path, cn_model)
                         if os.path.isfile(cn_model_path + '.pt'):
                             cn_model_path = cn_model_path + '.pt'
@@ -590,7 +602,7 @@ def get_diffusers_sd_model(model_config, vae_ckpt, sampler_name, enable_caching,
                             cn_model_path = cn_model_path + '.pth'
                         controlnet.append(ControlNetModel.from_single_file(cn_model_path, local_files_only=True))
                 else:
-                    cn_model_dir_path = os.path.join(curr_dir_path, 'extensions', 'sd-webui-controlnet', 'models')
+                    cn_model_dir_path = os.path.join(curr_dir_path,'models', 'ControlNet')
                     cn_model_path = os.path.join(cn_model_dir_path, model_state.control_models[0])
                     if os.path.isfile(cn_model_path + '.pt'):
                         cn_model_path = cn_model_path + '.pt'
@@ -600,7 +612,7 @@ def get_diffusers_sd_model(model_config, vae_ckpt, sampler_name, enable_caching,
                         cn_model_path = cn_model_path + '.pth'
                     controlnet = ControlNetModel.from_single_file(cn_model_path, local_files_only=True)
                 sd_model = StableDiffusionControlNetPipeline(**sd_model.components, controlnet=controlnet)
-                sd_model.controlnet = torch.compile(sd_model.controlnet, backend="openvino_fx_ext")
+                sd_model.controlnet = torch.compile(sd_model.controlnet, backend="openvino_fx")
         else:
             if model_config != "None":
                 local_config_file = os.path.join(curr_dir_path, 'configs', model_config)
@@ -616,7 +628,7 @@ def get_diffusers_sd_model(model_config, vae_ckpt, sampler_name, enable_caching,
                 if (len(model_state.control_models) > 1):
                     controlnet = []
                     for cn_model in model_state.control_models:
-                        cn_model_dir_path = os.path.join(curr_dir_path, 'extensions', 'sd-webui-controlnet', 'models')
+                        cn_model_dir_path = os.path.join(curr_dir_path,'models', 'ControlNet')
                         cn_model_path = os.path.join(cn_model_dir_path, cn_model)
                         if os.path.isfile(cn_model_path + '.pt'):
                             cn_model_path = cn_model_path + '.pt'
@@ -626,7 +638,7 @@ def get_diffusers_sd_model(model_config, vae_ckpt, sampler_name, enable_caching,
                             cn_model_path = cn_model_path + '.pth'
                         controlnet.append(ControlNetModel.from_single_file(cn_model_path, local_files_only=True))
                 else:
-                    cn_model_dir_path = os.path.join(curr_dir_path, 'extensions', 'sd-webui-controlnet', 'models')
+                    cn_model_dir_path = os.path.join(curr_dir_path,'models', 'ControlNet')
                     cn_model_path = os.path.join(cn_model_dir_path, model_state.control_models[0])
                     if os.path.isfile(cn_model_path + '.pt'):
                         cn_model_path = cn_model_path + '.pt'
@@ -636,7 +648,7 @@ def get_diffusers_sd_model(model_config, vae_ckpt, sampler_name, enable_caching,
                         cn_model_path = cn_model_path + '.pth'
                     controlnet = ControlNetModel.from_single_file(cn_model_path, local_files_only=True)
                 sd_model = StableDiffusionControlNetPipeline(**sd_model.components, controlnet=controlnet)
-                sd_model.controlnet = torch.compile(sd_model.controlnet, backend="openvino_fx_ext")
+                sd_model.controlnet = torch.compile(sd_model.controlnet, backend="openvino_fx")
 
         #load lora
 
@@ -652,17 +664,17 @@ def get_diffusers_sd_model(model_config, vae_ckpt, sampler_name, enable_caching,
         sd_model.safety_checker = None
         sd_model.cond_stage_key = functools.partial(cond_stage_key, shared.sd_model)
         sd_model.scheduler = set_scheduler(sd_model, sampler_name)
-        sd_model.unet = torch.compile(sd_model.unet, backend="openvino_fx_ext")
+        sd_model.unet = torch.compile(sd_model.unet, backend="openvino_fx")
         ## VAE
         if vae_ckpt == "Disable-VAE-Acceleration":
             sd_model.vae.decode = sd_model.vae.decode
         elif vae_ckpt == "None":
-            sd_model.vae.decode = torch.compile(sd_model.vae.decode, backend="openvino_fx_ext")
+            sd_model.vae.decode = torch.compile(sd_model.vae.decode, backend="openvino_fx")
         else:
             vae_path = os.path.join(curr_dir_path, 'models', 'VAE', vae_ckpt)
             print("OpenVINO Script:  loading vae from : " + vae_path)
             sd_model.vae = AutoencoderKL.from_single_file(vae_path, local_files_only=True)
-            sd_model.vae.decode = torch.compile(sd_model.vae.decode, backend="openvino_fx_ext")
+            sd_model.vae.decode = torch.compile(sd_model.vae.decode, backend="openvino_fx")
         shared.sd_diffusers_model = sd_model
         del sd_model
     return shared.sd_diffusers_model
@@ -679,17 +691,17 @@ def get_diffusers_sd_refiner_model(model_config, vae_ckpt, sampler_name, enable_
             refiner_model.watermark = NoWatermark()
             refiner_model.sd_checkpoint_info = refiner_checkpoint_info
             refiner_model.sd_model_hash = refiner_checkpoint_info.calculate_shorthash()
-            refiner_model.unet = torch.compile(refiner_model.unet,  backend="openvino_fx_ext")
+            refiner_model.unet = torch.compile(refiner_model.unet,  backend="openvino_fx")
             ## VAE
             if vae_ckpt == "Disable-VAE-Acceleration":
                 refiner_model.vae.decode = refiner_model.vae.decode
             elif vae_ckpt == "None":
-                refiner_model.vae.decode = torch.compile(refiner_model.vae.decode, backend="openvino_fx_ext")
+                refiner_model.vae.decode = torch.compile(refiner_model.vae.decode, backend="openvino_fx")
             else:
                 vae_path = os.path.join(curr_dir_path, 'models', 'VAE', vae_ckpt)
                 print("OpenVINO Script:  loading vae from : " + vae_path)
                 refiner_model.vae = AutoencoderKL.from_single_file(vae_path, local_files_only=True)
-                refiner_model.vae.decode = torch.compile(refiner_model.vae.decode, backend="openvino_fx_ext")
+                refiner_model.vae.decode = torch.compile(refiner_model.vae.decode, backend="openvino_fx")
             shared.sd_refiner_model = refiner_model
         del refiner_model
     return shared.sd_refiner_model
@@ -836,7 +848,7 @@ def process_images_openvino(p: StableDiffusionProcessing, model_config, vae_ckpt
             cn_params = p.extra_generation_params[key]
             cn_param_elements = [part.strip() for part in cn_params.split(', ')]
             for element in cn_param_elements:
-                if (element.split(':')[0] == "model"):
+                if (element.split(':')[0] == "Model"):
                     cn_model = (element.split(':')[1]).split(' ')[1]
 
             if (cn_model != "None"):
@@ -1158,7 +1170,7 @@ def on_change(mode):
 
 class Script(scripts.Script):
     def title(self):
-        return "Accelerate with OpenVINO from Extention format(NEW)"
+        return "Accelerate with OpenVINO"
 
     def show(self, is_img2img):
         return True
@@ -1208,7 +1220,7 @@ class Script(scripts.Script):
                 refiner_frac = gr.Slider(minimum=0, maximum=1, step=0.1, label='Refiner Denosing Fraction:', value=0.8)
 
         override_sampler = gr.Checkbox(label="Override the sampling selection from the main UI (Recommended as only below sampling methods have been validated for OpenVINO)", value=True)
-        sampler_name = gr.Radio(label="Select a sampling method", choices=["Euler a", "Euler", "LMS", "Heun", "DPM++ 2M", "LMS Karras", "DPM++ 2M Karras", "DDIM", "PLMS"], value="Euler a")
+        sampler_name = gr.Radio(label="Select a sampling method", choices=["Euler a", "Euler", "LMS", "Heun", "DPM++ 2M", "DPM++ 2M SDE", "LMS Karras", "DPM++ 2M Karras", "DDIM", "PLMS"], value="Euler a")
         enable_caching = gr.Checkbox(label="Cache the compiled models on disk for faster model load in subsequent launches (Recommended)", value=True, elem_id=self.elem_id("enable_caching"))
         override_hires = gr.Checkbox(label="Override the Hires.fix selection from the main UI (Recommended as only below upscalers have been validated for OpenVINO)", value=False, visible=self.is_txt2img)
         with gr.Group(visible=False) as hires:
@@ -1265,9 +1277,9 @@ class Script(scripts.Script):
         if override_sampler:
             p.sampler_name = sampler_name
         else:
-            supported_samplers = ["Euler a", "Euler", "LMS", "Heun", "DPM++ 2M", "LMS Karras", "DPM++ 2M Karras", "DDIM", "PLMS"]
+            supported_samplers = ["Euler a", "Euler", "LMS", "Heun", "DPM++ 2M", "DPM++ 2M SDE", "LMS Karras", "DPM++ 2M Karras", "DDIM", "PLMS"]
             if (p.sampler_name not in supported_samplers):
-                p.sampler_name = "Euler a"
+                print(f"{p.sampler_name} not officially supported!")
 
         # mode can be 0, 1, 2 corresponding to txt2img, img2img, inpaint respectively
         mode = 0
