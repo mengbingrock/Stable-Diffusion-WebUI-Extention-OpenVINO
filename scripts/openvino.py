@@ -1,6 +1,6 @@
 # Copyright (C) 2023 Intel Corporation
 # SPDX-License-Identifier: AGPL-3.0
-
+from contextlib import closing
 import cv2
 import os
 import torch
@@ -8,12 +8,16 @@ import time
 import hashlib
 import functools
 import gradio as gr
+from modules.ui import plaintext_to_html
 import numpy as np
 import sys
+
 
 import modules
 import modules.paths as paths
 import modules.scripts as scripts
+
+from modules import processing
 
 from modules import images, devices, extra_networks, masking, shared, sd_models_config, prompt_parser
 from modules.processing import (
@@ -835,13 +839,12 @@ def process_images_openvino(p: StableDiffusionProcessing, model_config, vae_ckpt
 
     def infotext(iteration=0, position_in_batch=0):
         return create_infotext(p, p.all_prompts, p.all_seeds, p.all_subseeds, comments, iteration, position_in_batch)
-
     if p.scripts is not None:
         p.scripts.process(p)
     cn_model="None"
     control_models = []
     control_images = []
-    print(p.extra_generation_params)
+    print("p.extra_generation_params", p.extra_generation_params)
     for key in p.extra_generation_params.keys():
         if key.startswith('ControlNet'):
             control_images_cn = []
@@ -930,10 +933,8 @@ def process_images_openvino(p: StableDiffusionProcessing, model_config, vae_ckpt
                 shared.sd_refiner_model = get_diffusers_sd_refiner_model(model_config, vae_ckpt, sampler_name, enable_caching, openvino_device, mode, is_xl_ckpt, refiner_ckpt, refiner_frac)
                 shared.sd_refiner_model.scheduler = set_scheduler(shared.sd_refiner_model, sampler_name)
 
-
             if p.scripts is not None:
                 p.scripts.process_batch(p, batch_number=n, prompts=p.prompts, seeds=p.seeds, subseeds=p.subseeds)
-
             # params.txt should be saved after scripts.process_batch, since the
             # infotext could be modified by that callback
             # Example: a wildcard processed by process_batch sets an extra model
@@ -1149,7 +1150,7 @@ def process_images_openvino(p: StableDiffusionProcessing, model_config, vae_ckpt
         subseed=p.all_subseeds[0],
         index_of_first_image=index_of_first_image,
         infotexts=infotexts,
-    )
+    ) # construct a Processed object
     if override_hires:
         res.info = res.info + f", Hires upscaler: {upscaler}, Denoising strength: {d_strength}"
     res.info = res.info + ", Warm up time: " + str(round(warmup_duration, 2)) + " secs "
@@ -1173,7 +1174,7 @@ class Script(scripts.Script):
         return "Accelerate with OpenVINO Extension"
 
     def show(self, is_img2img):
-        return True
+        return scripts.AlwaysVisible
 
     def ui(self, is_img2img):
         core = Core()
@@ -1204,46 +1205,61 @@ class Script(scripts.Script):
                     refiner_list.append(file)
             return refiner_list
 
-        with gr.Group():
+        with gr.Accordion('OV Extension Template', open=False):
+            
+            enable_ov_extension = gr.Checkbox(label='check to enable OV extension', value=False)
+            enable_ov_status = gr.Textbox(label="Enabled", interactive=False, visible=False)
+            
             with gr.Row():
-                with gr.Row():
-                    model_config = gr.Dropdown(label="Select a local config for the model from the configs directory of the webui root", choices=get_config_list(), value="None", visible=True)
-                    create_refresh_button(model_config, get_config_list, lambda: {"choices": get_config_list()},"refresh_model_config")
-                with gr.Row():
-                    vae_ckpt = gr.Dropdown(label="Custom VAE", choices=get_vae_list(), value="None", visible=True)
-                    create_refresh_button(vae_ckpt, get_vae_list, lambda: {"choices": get_vae_list()},"refresh_vae_directory")
-        openvino_device = gr.Dropdown(label="Select a device", choices=list(core.available_devices), value=model_state.device)
-        is_xl_ckpt= gr.Checkbox(label="Loaded checkpoint is a SDXL checkpoint", value=False)
-        with gr.Row():
+                model_config = gr.Dropdown(label="Select a local config for the model from the configs directory of the webui root", choices=get_config_list(), value="None", visible=True)
+                create_refresh_button(model_config, get_config_list, lambda: {"choices": get_config_list()},"refresh_model_config")
+            with gr.Row():
+                vae_ckpt = gr.Dropdown(label="Custom VAE", choices=get_vae_list(), value="None", visible=True)
+                create_refresh_button(vae_ckpt, get_vae_list, lambda: {"choices": get_vae_list()},"refresh_vae_directory")
+            openvino_device = gr.Dropdown(label="Select a device", choices=list(core.available_devices), value=model_state.device)
+            is_xl_ckpt= gr.Checkbox(label="Loaded checkpoint is a SDXL checkpoint", value=False)
+            with gr.Row():
                 refiner_ckpt = gr.Dropdown(label="Refiner Model", choices=get_refiner_list(), value="None")
                 create_refresh_button(refiner_ckpt, get_refiner_list,lambda: {"choices": get_refiner_list()},"refresh_refiner_directory" )
                 refiner_frac = gr.Slider(minimum=0, maximum=1, step=0.1, label='Refiner Denosing Fraction:', value=0.8)
 
-        override_sampler = gr.Checkbox(label="Override the sampling selection from the main UI (Recommended as only below sampling methods have been validated for OpenVINO)", value=True)
-        sampler_name = gr.Radio(label="Select a sampling method", choices=["Euler a", "Euler", "LMS", "Heun", "DPM++ 2M", "DPM++ 2M SDE", "LMS Karras", "DPM++ 2M Karras", "DDIM", "PLMS"], value="Euler a")
-        enable_caching = gr.Checkbox(label="Cache the compiled models on disk for faster model load in subsequent launches (Recommended)", value=True, elem_id=self.elem_id("enable_caching"))
-        override_hires = gr.Checkbox(label="Override the Hires.fix selection from the main UI (Recommended as only below upscalers have been validated for OpenVINO)", value=False, visible=self.is_txt2img)
-        with gr.Group(visible=False) as hires:
-            with gr.Row():
-                upscaler = gr.Dropdown(label="Upscaler", choices=["Latent"], value="Latent")
-                hires_steps = gr.Slider(1, 150, value=10, step=1, label="Steps")
-                d_strength = gr.Slider(0, 1, value=0.5, step=0.01, label="Strength")
-        warmup_status = gr.Textbox(label="Device", interactive=False, visible=False)
-        vae_status = gr.Textbox(label="VAE", interactive=False, visible=False)
-        gr.Markdown(
-        """
-        ###
-        ### Note:
-        - First inference involves compilation of the model for best performance.
-        Since compilation happens only on the first run, the first inference (or warm up inference) will be slower than subsequent inferences.
-        - For accurate performance measurements, it is recommended to exclude this slower first inference, as it doesn't reflect normal running time.
-        - Model is recompiled when resolution, batchsize, device, or samplers like DPM++ or Karras are changed.
-        After recompiling, later inferences will reuse the newly compiled model and achieve faster running times.
-        So it's normal for the first inference after a settings change to be slower, while subsequent inferences use the optimized compiled model and run faster.
-        """)
+            override_sampler = gr.Checkbox(label="Override the sampling selection from the main UI (Recommended as only below sampling methods have been validated for OpenVINO)", value=True)
+            sampler_name = gr.Radio(label="Select a sampling method", choices=["Euler a", "Euler", "LMS", "Heun", "DPM++ 2M", "DPM++ 2M SDE", "LMS Karras", "DPM++ 2M Karras", "DDIM", "PLMS"], value="Euler a")
+            enable_caching = gr.Checkbox(label="Cache the compiled models on disk for faster model load in subsequent launches (Recommended)", value=True, elem_id=self.elem_id("enable_caching"))
+            override_hires = gr.Checkbox(label="Override the Hires.fix selection from the main UI (Recommended as only below upscalers have been validated for OpenVINO)", value=False, visible=self.is_txt2img)
+            with gr.Group(visible=False) as hires:
+                with gr.Row():
+                    upscaler = gr.Dropdown(label="Upscaler", choices=["Latent"], value="Latent")
+                    hires_steps = gr.Slider(1, 150, value=10, step=1, label="Steps")
+                    d_strength = gr.Slider(0, 1, value=0.5, step=0.01, label="Strength")
+            warmup_status = gr.Textbox(label="Device", interactive=False, visible=False)
+            vae_status = gr.Textbox(label="VAE", interactive=False, visible=False)
+            gr.Markdown(
+            """
+            ###
+            ### Note:
+            - First inference involves compilation of the model for best performance.
+            Since compilation happens only on the first run, the first inference (or warm up inference) will be slower than subsequent inferences.
+            - For accurate performance measurements, it is recommended to exclude this slower first inference, as it doesn't reflect normal running time.
+            - Model is recompiled when resolution, batchsize, device, or samplers like DPM++ or Karras are changed.
+            After recompiling, later inferences will reuse the newly compiled model and achieve faster running times.
+            So it's normal for the first inference after a settings change to be slower, while subsequent inferences use the optimized compiled model and run faster.
+            """)
 
-        override_hires.change(on_change, override_hires, hires)
-
+            override_hires.change(on_change, override_hires, hires)
+        
+        def enable_change(choice):
+                if choice:
+                    processing._process_images = processing.process_images
+                    print("enable vo extension")
+                    processing.process_images = self.run
+                else:
+                    if hasattr(processing, '_process_images'):
+                        processing.process_images = processing._process_images
+                    print('disable ov extension')
+        
+        enable_ov_extension.change(enable_change, enable_ov_extension, enable_ov_status)
+        
         def device_change(choice):
             if (model_state.device == choice):
                 return gr.update(value="Device selected is " + choice, visible=True)
@@ -1266,9 +1282,21 @@ class Script(scripts.Script):
             else:
                 model_state.refiner_ckpt = choice
         refiner_ckpt.change(refiner_ckpt_change, refiner_ckpt)
-        return [model_config, vae_ckpt, openvino_device, override_sampler, sampler_name, enable_caching, override_hires, upscaler, hires_steps, d_strength, is_xl_ckpt, refiner_ckpt, refiner_frac]
+        return [enable_ov_extension, model_config, vae_ckpt, openvino_device, override_sampler, sampler_name, enable_caching, override_hires, upscaler, hires_steps, d_strength, is_xl_ckpt, refiner_ckpt, refiner_frac]
 
-    def run(self, p, model_config, vae_ckpt, openvino_device, override_sampler, sampler_name, enable_caching, override_hires, upscaler, hires_steps, d_strength, is_xl_ckpt, refiner_ckpt, refiner_frac):
+    
+    def run(self, p: StableDiffusionProcessing, *kargs):
+        if self.is_txt2img:
+            s = scripts.scripts_txt2img.title_map['ov extension template']
+        else:
+            s = scripts.scripts_img2img.title_map['ov extension template']
+        start = s.args_from
+        end = s.args_to
+        enabled, model_config, vae_ckpt, openvino_device, override_sampler, sampler_name, enable_caching, override_hires, upscaler, hires_steps, d_strength, is_xl_ckpt, refiner_ckpt, refiner_frac = \
+            kargs[start-15:start-1]
+        
+
+        print("OpenVINO Script:  running with OpenVINO Extension")
         os.environ["OPENVINO_TORCH_BACKEND_DEVICE"] = str(openvino_device)
 
         if enable_caching:
