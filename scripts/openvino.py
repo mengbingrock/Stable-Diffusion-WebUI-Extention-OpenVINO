@@ -1292,8 +1292,10 @@ class Script(scripts.Script):
             s = scripts.scripts_img2img.title_map['ov extension template']
         start = s.args_from
         end = s.args_to
+        print(p.script_args[start-14:start])
         enabled, model_config, vae_ckpt, openvino_device, override_sampler, sampler_name, enable_caching, override_hires, upscaler, hires_steps, d_strength, is_xl_ckpt, refiner_ckpt, refiner_frac = \
-            kargs[start-15:start-1]
+            p.script_args[start-14:start]
+            #kargs[start-15:start-1]
         
 
         print("OpenVINO Script:  running with OpenVINO Extension")
