@@ -11,13 +11,14 @@ import gradio as gr
 from modules.ui import plaintext_to_html
 import numpy as np
 import sys
+from typing import List
 
 
 import modules
 import modules.paths as paths
 import modules.scripts as scripts
 
-from modules import processing
+from modules import processing, sd_unet
 
 from modules import images, devices, extra_networks, masking, shared, sd_models_config, prompt_parser
 from modules.processing import (
@@ -1007,7 +1008,7 @@ def process_images_openvino(p: StableDiffusionProcessing, model_config, vae_ckpt
                         'negative_prompt_embeds' : negative_prompt_embeds
                     }
                 )
-
+            # main infer here
             output = shared.sd_diffusers_model(
                     num_inference_steps=p.steps,
                     guidance_scale=p.cfg_scale,
@@ -1169,6 +1170,117 @@ def process_images_openvino(p: StableDiffusionProcessing, model_config, vae_ckpt
 def on_change(mode):
     return gr.update(visible=mode)
 
+import ldm.modules.diffusionmodules.model
+import ldm.modules.diffusionmodules.openaimodel
+
+OV_df_unet = None
+class OVUnetOption(sd_unet.SdUnetOption):
+    def __init__(self, name: str):
+        self.label = f"[OV] {name}"
+        self.model_name = name
+        self.configs = None
+
+    def create_unet(self):
+        return OVUnet(self.model_name)
+
+
+    
+class OVUnet(sd_unet.SdUnet):
+    def __init__(self, model_name: str, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.model_name = model_name
+        #self.configs = configs
+
+        self.loaded_config = None
+
+        self.engine_vram_req = 0
+        self.refitted_keys = set()
+
+        self.engine = None
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        timesteps: torch.Tensor,
+        context: torch.Tensor,
+        *args,
+        **kwargs,
+    ) -> torch.Tensor:
+        #print("x:", x)
+        #print("timesteps:", timesteps)
+        #print("context:", context)
+        '''
+        feed_dict = {
+            "sample": x.float(),
+            "timesteps": timesteps.float(),
+            "encoder_hidden_states": context.float(),
+        }
+        '''
+        if "y" in kwargs:
+            feed_dict["y"] = kwargs["y"].float()
+
+        
+        print('OVUnet forward called!!! begin calling unet forward!!!')
+        
+        out = self.engine(x, timesteps, context, *args, **kwargs).sample
+        
+
+        return out
+
+    def apply_loras(self, refit_dict: dict):
+        if not self.refitted_keys.issubset(set(refit_dict.keys())):
+            # Need to ensure that weights that have been modified before and are not present anymore are reset.
+            self.refitted_keys = set()
+            self.switch_engine()
+
+        self.engine.refit_from_dict(refit_dict, is_fp16=True)
+        self.refitted_keys = set(refit_dict.keys())
+
+    def switch_engine(self):
+        self.loaded_config = self.configs[self.profile_idx]
+        self.engine.reset(os.path.join(TRT_MODEL_DIR, self.loaded_config["filepath"]))
+        self.activate()
+
+    def activate(self):
+        #self.loaded_config = self.configs[self.profile_idx]
+        if self.engine is None:
+            model_state.partition_id = 0
+            torch._dynamo.reset()
+            openvino_clear_caches()
+            curr_dir_path = os.getcwd()
+            checkpoint_name = shared.opts.sd_model_checkpoint.split(" ")[0]
+            checkpoint_path = os.path.join(curr_dir_path, 'models', 'Stable-diffusion', checkpoint_name)
+            checkpoint_info = CheckpointInfo(checkpoint_path)
+            timer = Timer()
+            state_dict = get_checkpoint_state_dict(checkpoint_info, timer)
+            checkpoint_config = sd_models_config.find_checkpoint_config(state_dict, checkpoint_info)
+            print("OpenVINO Script:  created model from config : " + checkpoint_config)
+            
+            sd_model_pipeline = StableDiffusionPipeline.from_single_file(checkpoint_path, original_config_file=checkpoint_config, use_safetensors=True, variant="fp32", dtype=torch.float32)
+
+            unet = sd_model_pipeline.unet 
+            unet = torch.compile(unet, backend="openvino")
+            print('end of torch compile')
+
+            self.engine = unet
+            
+            
+            
+            
+
+        
+        
+        
+        #print(self.engine) # not none
+        print('end of activate')
+        
+
+    def deactivate(self):
+        del self.engine
+
+        
+
 class Script(scripts.Script):
     def title(self):
         return "Accelerate with OpenVINO Extension"
@@ -1208,45 +1320,9 @@ class Script(scripts.Script):
         with gr.Accordion('OV Extension Template', open=False):
             
             enable_ov_extension = gr.Checkbox(label='check to enable OV extension', value=False)
-            enable_ov_status = gr.Textbox(label="Enabled", interactive=False, visible=False)
             
-            with gr.Row():
-                model_config = gr.Dropdown(label="Select a local config for the model from the configs directory of the webui root", choices=get_config_list(), value="None", visible=True)
-                create_refresh_button(model_config, get_config_list, lambda: {"choices": get_config_list()},"refresh_model_config")
-            with gr.Row():
-                vae_ckpt = gr.Dropdown(label="Custom VAE", choices=get_vae_list(), value="None", visible=True)
-                create_refresh_button(vae_ckpt, get_vae_list, lambda: {"choices": get_vae_list()},"refresh_vae_directory")
-            openvino_device = gr.Dropdown(label="Select a device", choices=list(core.available_devices), value=model_state.device)
-            is_xl_ckpt= gr.Checkbox(label="Loaded checkpoint is a SDXL checkpoint", value=False)
-            with gr.Row():
-                refiner_ckpt = gr.Dropdown(label="Refiner Model", choices=get_refiner_list(), value="None")
-                create_refresh_button(refiner_ckpt, get_refiner_list,lambda: {"choices": get_refiner_list()},"refresh_refiner_directory" )
-                refiner_frac = gr.Slider(minimum=0, maximum=1, step=0.1, label='Refiner Denosing Fraction:', value=0.8)
+            
 
-            override_sampler = gr.Checkbox(label="Override the sampling selection from the main UI (Recommended as only below sampling methods have been validated for OpenVINO)", value=True)
-            sampler_name = gr.Radio(label="Select a sampling method", choices=["Euler a", "Euler", "LMS", "Heun", "DPM++ 2M", "DPM++ 2M SDE", "LMS Karras", "DPM++ 2M Karras", "DDIM", "PLMS"], value="Euler a")
-            enable_caching = gr.Checkbox(label="Cache the compiled models on disk for faster model load in subsequent launches (Recommended)", value=True, elem_id=self.elem_id("enable_caching"))
-            override_hires = gr.Checkbox(label="Override the Hires.fix selection from the main UI (Recommended as only below upscalers have been validated for OpenVINO)", value=False, visible=self.is_txt2img)
-            with gr.Group(visible=False) as hires:
-                with gr.Row():
-                    upscaler = gr.Dropdown(label="Upscaler", choices=["Latent"], value="Latent")
-                    hires_steps = gr.Slider(1, 150, value=10, step=1, label="Steps")
-                    d_strength = gr.Slider(0, 1, value=0.5, step=0.01, label="Strength")
-            warmup_status = gr.Textbox(label="Device", interactive=False, visible=False)
-            vae_status = gr.Textbox(label="VAE", interactive=False, visible=False)
-            gr.Markdown(
-            """
-            ###
-            ### Note:
-            - First inference involves compilation of the model for best performance.
-            Since compilation happens only on the first run, the first inference (or warm up inference) will be slower than subsequent inferences.
-            - For accurate performance measurements, it is recommended to exclude this slower first inference, as it doesn't reflect normal running time.
-            - Model is recompiled when resolution, batchsize, device, or samplers like DPM++ or Karras are changed.
-            After recompiling, later inferences will reuse the newly compiled model and achieve faster running times.
-            So it's normal for the first inference after a settings change to be slower, while subsequent inferences use the optimized compiled model and run faster.
-            """)
-
-            override_hires.change(on_change, override_hires, hires)
         
         def enable_change(choice):
                 if choice:
@@ -1258,7 +1334,6 @@ class Script(scripts.Script):
                         processing.process_images = processing._process_images
                     print('disable ov extension')
         
-        enable_ov_extension.change(enable_change, enable_ov_extension, enable_ov_status)
         
         def device_change(choice):
             if (model_state.device == choice):
@@ -1267,7 +1342,7 @@ class Script(scripts.Script):
                 model_state.device = choice
                 model_state.recompile = 1
                 return gr.update(value="Device changed to " + choice + ". Model will be re-compiled", visible=True)
-        openvino_device.change(device_change, openvino_device, warmup_status)
+        #openvino_device.change(device_change, openvino_device, warmup_status)
         def vae_change(choice):
             if (model_state.vae_ckpt == choice):
                 return gr.update(value="vae_ckpt selected is " + choice, visible=True)
@@ -1275,17 +1350,58 @@ class Script(scripts.Script):
                 model_state.vae_ckpt = choice
                 model_state.recompile = 1
                 return gr.update(value="Custom VAE changed to " + choice + ". Model will be re-compiled", visible=True)
-        vae_ckpt.change(vae_change, vae_ckpt, vae_status)
+        #vae_ckpt.change(vae_change, vae_ckpt, vae_status)
         def refiner_ckpt_change(choice):
             if (model_state.refiner_ckpt == choice):
                 return gr.update(value="Custom Refiner selected is " + choice, visible=True)
             else:
                 model_state.refiner_ckpt = choice
-        refiner_ckpt.change(refiner_ckpt_change, refiner_ckpt)
-        return [enable_ov_extension, model_config, vae_ckpt, openvino_device, override_sampler, sampler_name, enable_caching, override_hires, upscaler, hires_steps, d_strength, is_xl_ckpt, refiner_ckpt, refiner_frac]
+        #refiner_ckpt.change(refiner_ckpt_change, refiner_ckpt)
+        return [enable_ov_extension]
 
-    
-    def run(self, p: StableDiffusionProcessing, *kargs):
+    def process(self, p, *args):
+        print("ov process called")
+        print(args)
+        enable_ov = args[0]
+        
+        if not enable_ov:
+            print('ov disabled, do nothing')
+            return
+        
+        
+        print('ov enabled')
+        print('sd_unet.current_unet_option',sd_unet.current_unet_option) # NOne
+        print("current_unet:",sd_unet.current_unet)
+        
+        print("shared.opts:",shared.opts.data_labels)
+        print("p.sd_model_name:",p.sd_model_name)
+        #shared.sd_model.model.diffusion_model = torch.compile(shared.sd_model.model.diffusion_model, backend="openvino_fx_ext")
+        #print("p.sd_model=", p.sd_model.model.diffusion_model)
+        #p.sd_model.model.diffusion_model = torch.compile(p.sd_model.model.diffusion_model, backend="openvino")
+        global OV_df_unet
+        if OV_df_unet == None:
+            OV_df_unet = OVUnet(p.sd_model_name)
+            self.apply_unet(OVUnetOption(p.sd_model_name))
+
+        
+        
+            
+        
+    def apply_unet(self, sd_unet_option = None):
+        if sd_unet.current_unet is not None:
+            print("Deactivating unet: ", sd_unet.current_unet)
+            sd_unet.current_unet.deactivate()
+        
+        print("begin activate unet")
+        sd_unet.current_unet = OV_df_unet
+        #sd_unet.current_unet.option = sd_unet_option
+        #sd_unet.current_unet_option = sd_unet_option
+
+        #print(f"Activating unet: {sd_unet.current_unet.option.label}")
+        sd_unet.current_unet.activate()
+
+    # obselete: rename to run_ 
+    def run_(self, p: StableDiffusionProcessing, *kargs):
         if self.is_txt2img:
             s = scripts.scripts_txt2img.title_map['ov extension template']
         else:
