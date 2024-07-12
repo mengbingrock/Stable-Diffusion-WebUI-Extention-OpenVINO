@@ -482,7 +482,7 @@ class OVUnet(sd_unet.SdUnet):
         down_block_res_samples, mid_block_res_sample = None, None 
         print('timesteps:', timesteps)
         print('x: min(x), max(x)', torch.min(x), torch.max(x))
-        import pdb; pdb.set_trace()
+        #import pdb; pdb.set_trace()
 
         if self.process.extra_generation_params:
             print('controlnet detected')
@@ -614,9 +614,9 @@ class OVUnet(sd_unet.SdUnet):
         #OV_df_unet.engine = torch.compile(OV_df_unet.engine, backend="openvino")
         print('OpenVINO Extension: loaded unet model')
             
-        input('check p.extra generation params')
+        #input('check p.extra generation params')
         if p.extra_generation_params:
-            input('controlnet detected')
+            print('controlnet detected')
     
             cn_model="None"
             control_models = []
@@ -652,7 +652,7 @@ class OVUnet(sd_unet.SdUnet):
             
             
             
-            input('begin loading controlnet model(s)')
+            print('begin loading controlnet model(s)')
             
             if (len(model_state.control_models) > 1):
                 controlnet = []
@@ -690,7 +690,7 @@ class OVUnet(sd_unet.SdUnet):
             
             
         else:
-            input('no controlnet detected')
+            print('no controlnet detected')
             
             
 
@@ -1016,7 +1016,7 @@ class Script(scripts.Script):
         
     def apply_unet(self, p):
         if sd_unet.current_unet is not None:
-            print("Deactivating unet: ", sd_unet.current_unet)
+            #print("Deactivating unet: ", sd_unet.current_unet)
             sd_unet.current_unet.deactivate()
         
         print("begin activate unet")
