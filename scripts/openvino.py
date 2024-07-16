@@ -408,6 +408,8 @@ def unmark_prompt_context(x):
 
 
 OV_df_unet = None
+
+OV_df_vae = None # vae diffusers model
 class OVUnetOption(sd_unet.SdUnetOption):
     def __init__(self, name: str):
         self.label = f"[OV] {name}"
@@ -988,6 +990,25 @@ class Script(scripts.Script):
         OV_df_unet = OVUnet(p.sd_model_name)
         OV_df_unet.process = p
         self.apply_unet(p)
+
+        
+        from modules.sd_vae import vae_dict, base_vae, loaded_vae_file # loaded_vae_file: /Users/mengbing/WorkSync/Git/stable-diffusion-webui-openVINO/models/VAE/vaeFtMse840000EmaPruned_vae.safetensors
+
+        # to do: add feature to fallback default vae after replacement
+
+        if loaded_vae_file is not None:
+            print('hook the vae')
+            from diffusers import AutoencoderKL
+            global OV_df_vae
+            if OV_df_vae is None: 
+                OV_df_vae = AutoencoderKL.from_single_file(loaded_vae_file, local_files_only=True)
+            def vaehook(img):
+                print('hooked vae called')
+                # OV_df_vae.decode = torch.compile(OV_df_vae.decode, backend="openvino")
+                return OV_df_vae.decode(img/OV_df_vae.config.scaling_factor, return_dict = False)[0]
+            shared.sd_model.decode_first_stage = vaehook
+        else:
+            print('no custom vae loaded')
         
         
         print('ov enabled')
