@@ -105,7 +105,7 @@ def install():
     codeformer_commit_hash = os.environ.get('CODEFORMER_COMMIT_HASH', "c5b4593074ba6214284d6acd5f1719b6c5d739af")
     blip_commit_hash = os.environ.get('BLIP_COMMIT_HASH', "48211a1594f1321b00f14c9f7a5b4813144b2fb9")
 
-
+    '''
     if not launch.is_installed("clip"):
         launch.run_pip(
             f"install {clip_package}", "clip"
@@ -115,6 +115,7 @@ def install():
         launch.run_pip(
             f"install {openclip_package}", "clip"
         )
+    '''
 
     os.makedirs(os.path.join(script_path, dir_repos), exist_ok=True)
     #git_clone(stable_diffusion_repo, repo_dir('stable-diffusion-stability-ai'), "Stable Diffusion", stable_diffusion_commit_hash)
@@ -126,12 +127,13 @@ def install():
 
 
 
-    #
+    '''
     if not launch.is_installed("lpips"):
         print("CodeFormer is not installed! Installing...")
         launch.run_pip(
             f"install -r \"{os.path.join(repo_dir('CodeFormer'), 'requirements.txt')}\"", "requirements for CodeFormer"
         )
+    '''
     
     print("OpenVINO extension install complete")
 
