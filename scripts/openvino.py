@@ -71,9 +71,14 @@ from diffusers import (
     AutoencoderKL,
 )
 from einops import rearrange
-import sys
+import sys, shutil, os
 from modules import scripts
 from enum import Enum
+
+
+
+
+
 current_extension_directory = scripts.basedir() + '/../sd-webui-controlnet'
 print('current_extension_directory', current_extension_directory)
 #sys.path.append(current_extension_directory)
@@ -844,7 +849,7 @@ class OVUnet(sd_unet.SdUnet):
         pipe = StableDiffusionPipeline.from_single_file(checkpoint_path, original_config_file=checkpoint_config, use_safetensors=True, variant="fp32", dtype=torch.float32)
         OV_df_unet.engine = pipe.unet 
         OV_df_unet.vae = pipe.vae 
-        #OV_df_unet.engine = torch.compile(OV_df_unet.engine, backend="openvino")
+        OV_df_unet.engine = torch.compile(OV_df_unet.engine, backend="openvino", options = opt)
         print('OpenVINO Extension: loaded unet model')
             
         #input('check p.extra generation params')
@@ -1052,6 +1057,8 @@ def get_pytorch_control(x: np.ndarray) -> torch.Tensor:
     y = y.clone()
     return y
 
+
+opt = dict() # openvino pytorch compile options
 class Script(scripts.Script):
     def title(self):
         return "stable-diffusion-webui-extension-openvino"
@@ -1091,6 +1098,9 @@ class Script(scripts.Script):
         with gr.Accordion('OV Extension', open=False):
             
             enable_ov_extension = gr.Checkbox(label='check to enable OV extension', value=False)
+            openvino_device = gr.Dropdown(label="Select a device", choices=list(core.available_devices), value=model_state.device)
+            enable_caching = gr.Checkbox(label="Cache the compiled models on disk for faster model load in subsequent launches (Recommended)", value=True, elem_id=self.elem_id("enable_caching"))
+
             
             
 
@@ -1128,7 +1138,7 @@ class Script(scripts.Script):
             else:
                 model_state.refiner_ckpt = choice
         #refiner_ckpt.change(refiner_ckpt_change, refiner_ckpt)
-        return [enable_ov_extension]
+        return [enable_ov_extension, openvino_device, enable_caching]
     
     
     @staticmethod
@@ -1533,7 +1543,7 @@ class Script(scripts.Script):
             
 
             control_model = OV_df_unet.controlnet
-            #control_model = torch.compile(OV_df_unet.controlnet, backend = 'openvino')  # ControlNetModel.from_single_file('./extensions/sd-webui-controlnet/models/control_v11p_sd15_canny_fp16.safetensors', local_files_only=True)
+            control_model = torch.compile(OV_df_unet.controlnet, backend = 'openvino', options = opt)  # ControlNetModel.from_single_file('./extensions/sd-webui-controlnet/models/control_v11p_sd15_canny_fp16.safetensors', local_files_only=True)
             down_block_res_samples, mid_block_res_sample = control_model(
                 x,
                 timesteps,
@@ -1595,7 +1605,6 @@ class Script(scripts.Script):
     def process(self, p, *args):
         print("[OV]ov process called")
         print(p.script_args)
-        input('[OV]check process p.script_args')
         import sys
         import os
         from modules import scripts
@@ -1604,14 +1613,31 @@ class Script(scripts.Script):
         sys.path.append(current_extension_directory)
         #from scripts.hook import UnetHook
 
-        
-        
-        #print(args)
         enable_ov = args[0] != False and args[0] != 'False'
-        
+        openvino_device = args[1] # device
+        enable_caching = args[2]
+
         if not enable_ov:
             print('ov disabled, do nothing')
             return
+        
+        opt["device"] = str(openvino_device)
+        opt["model_caching"] = True 
+        
+
+        dir_path = "./model_cache" 
+        if enable_caching:
+            opt["cache_dir"] = dir_path
+        else:
+            if "cache_dir" in opt: del opt["cache_dir"] 
+            
+            if os.path.exists(dir_path) and os.path.isdir(dir_path):
+                # Remove the directory and its contents
+                shutil.rmtree(dir_path)
+                print(f"Directory '{dir_path}' and its contents have been removed.")
+            else:
+                print(f"Directory '{dir_path}' does not exist.")
+            
         
         global OV_df_unet
         #if OV_df_unet == None:
@@ -1632,7 +1658,7 @@ class Script(scripts.Script):
                 OV_df_vae = AutoencoderKL.from_single_file(loaded_vae_file, local_files_only=True)
             def vaehook(img):
                 print('hooked vae called')
-                # OV_df_vae.decode = torch.compile(OV_df_vae.decode, backend="openvino")
+                OV_df_vae.decode = torch.compile(OV_df_vae.decode, backend="openvino", options = opt)
                 return OV_df_vae.decode(img/OV_df_vae.config.scaling_factor, return_dict = False)[0]
             shared.sd_model.decode_first_stage = vaehook
         else:
