@@ -122,6 +122,8 @@ tmp_torch.BUILD_MAP_UNPACK_WITH_CALL = BUILD_MAP_UNPACK
 
 class ModelState:
     def __init__(self):
+        self.enable_ov_extension = False
+        self.enable_caching = False
         self.recompile = 1
         self.device = "CPU"
         self.height = 512
@@ -136,8 +138,8 @@ class ModelState:
         self.lora_model = "None"
         self.vae_ckpt = "None"
         self.refiner_ckpt = "None"
-
-
+        
+        
 model_state = ModelState()
 
 DEFAULT_OPENVINO_PYTHON_CONFIG = MappingProxyType(
@@ -420,7 +422,7 @@ def unmark_prompt_context(x):
     return mark_batch, uc_indices, c_indices, context
 
 
-OV_df_unet = None
+OV_df_pipe = None
 
 OV_df_vae = None # vae diffusers model
 class OVUnetOption(sd_unet.SdUnetOption):
@@ -669,7 +671,7 @@ class OVUnet(sd_unet.SdUnet):
         self.engine_vram_req = 0
         self.refitted_keys = set()
 
-        self.engine = None
+        self.unet = None
         self.controlnet = None
         self.control_images = None
         self.control_images = []
@@ -705,10 +707,7 @@ class OVUnet(sd_unet.SdUnet):
         
         print('extra_generation_params: ',self.process.extra_generation_params)
         
-
-        
-        
-        out = self.engine(x, timesteps, context, *args, **kwargs).sample
+        out = self.unet(x, timesteps, context, *args, **kwargs).sample
         
 
         return out
@@ -716,31 +715,26 @@ class OVUnet(sd_unet.SdUnet):
     
     def forward(self, x, timesteps=None, context=None, y=None, **kwargs):
         
-        
         down_block_res_samples, mid_block_res_sample = None, None 
         print('timesteps:', timesteps)
         print('x: min(x), max(x)', torch.min(x), torch.max(x))
-        #import pdb; pdb.set_trace()
 
         if self.has_controlnet:
             print('controlnet detected')
             cond_mark, self.current_uc_indices, self.current_c_indices, context = unmark_prompt_context(context)
 
             
-            
-            print('check processed image shape')
-
-            control_model = OV_df_unet.controlnet
-            image = OV_df_unet.control_images[0]
+            control_model = OV_df_pipe.controlnet
+            image = OV_df_pipe.control_images[0]
             print('image min and max:', torch.min(image), torch.max(image))
             print('x min and max:', torch.min(x), torch.max(x)) #  tensor(-13.3997) tensor(11.1092)
             print('context min and max:', torch.min(context), torch.max(context),'shape:', context.shape ) #  tensor(-1024.) tensor(1024.)  [2, 78, 768])
-            #control_model = torch.compile(OV_df_unet.controlnet, backend = 'openvino')  # ControlNetModel.from_single_file('./extensions/sd-webui-controlnet/models/control_v11p_sd15_canny_fp16.safetensors', local_files_only=True)
+            control_model = torch.compile(OV_df_pipe.controlnet, backend = 'openvino', options = opt)  # ControlNetModel.from_single_file('./extensions/sd-webui-controlnet/models/control_v11p_sd15_canny_fp16.safetensors', local_files_only=True)
             down_block_res_samples, mid_block_res_sample = control_model(
                 x,
                 timesteps,
                 encoder_hidden_states=context,
-                controlnet_cond=OV_df_unet.control_images[0],
+                controlnet_cond=OV_df_pipe.control_images[0],
                 conditioning_scale=1.0,
                 guess_mode = False,
                 return_dict=False,
@@ -763,8 +757,8 @@ class OVUnet(sd_unet.SdUnet):
             #import pdb; pdb.set_trace()
 
         
-        #OV_df_unet.engine = torch.compile(OV_df_unet.engine, backend = 'openvino')
-        noise_pred = OV_df_unet.engine(
+        #OV_df_pipe.unet = torch.compile(OV_df_pipe.unet, backend = 'openvino', options = opt); print('[OV] torch.compile unet')
+        noise_pred = OV_df_pipe.unet(
                 x,
                 timesteps,
                 context,
@@ -808,7 +802,7 @@ class OVUnet(sd_unet.SdUnet):
         guess_mode=False,
     ):  
         from diffusers.image_processor import VaeImageProcessor
-        self.vae_scale_factor = 2 ** (len(OV_df_unet.vae.config.block_out_channels) - 1)
+        self.vae_scale_factor = 2 ** (len(OV_df_pipe.vae.config.block_out_channels) - 1)
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor, do_convert_rgb=True)
         self.control_image_processor = VaeImageProcessor(
             vae_scale_factor=self.vae_scale_factor, do_convert_rgb=True, do_normalize=False
@@ -847,9 +841,9 @@ class OVUnet(sd_unet.SdUnet):
         checkpoint_config = sd_models_config.find_checkpoint_config(state_dict, checkpoint_info)
         print("OpenVINO Extension:  created model from config : " + checkpoint_config)
         pipe = StableDiffusionPipeline.from_single_file(checkpoint_path, original_config_file=checkpoint_config, use_safetensors=True, variant="fp32", dtype=torch.float32)
-        OV_df_unet.engine = pipe.unet 
-        OV_df_unet.vae = pipe.vae 
-        OV_df_unet.engine = torch.compile(OV_df_unet.engine, backend="openvino", options = opt)
+        OV_df_pipe.unet = pipe.unet 
+        OV_df_pipe.vae = pipe.vae 
+        OV_df_pipe.unet = torch.compile(OV_df_pipe.unet, backend="openvino", options = opt)
         print('OpenVINO Extension: loaded unet model')
             
         #input('check p.extra generation params')
@@ -900,7 +894,7 @@ class OVUnet(sd_unet.SdUnet):
         self.has_controlnet = True
         
         model_state.control_models = control_models
-        OV_df_unet.control_images = control_images
+        OV_df_pipe.control_images = control_images
         
         print("model_state.control_models:", model_state.control_models)
         
@@ -918,7 +912,7 @@ class OVUnet(sd_unet.SdUnet):
                 elif os.path.isfile(cn_model_path + '.pth'):
                     cn_model_path = cn_model_path + '.pth'
                 controlnet.append(ControlNetModel.from_single_file(cn_model_path, local_files_only=True))
-            OV_df_unet.controlnet = controlnet
+            OV_df_pipe.controlnet = controlnet
         else:
             cn_model_dir_path = os.path.join(scripts.basedir(),'extensions','sd-webui-controlnet','models')
             cn_model_path = os.path.join(cn_model_dir_path, model_state.control_models[0])
@@ -929,19 +923,19 @@ class OVUnet(sd_unet.SdUnet):
             elif os.path.isfile(cn_model_path + '.pth'):
                 cn_model_path = cn_model_path + '.pth'
             controlnet = ControlNetModel.from_single_file(cn_model_path, local_files_only=True)
-            OV_df_unet.controlnet = controlnet
+            OV_df_pipe.controlnet = controlnet
         
         # process image
         print('begin self.prepare_image')
-        for i in range(len(OV_df_unet.control_images)):
-            OV_df_unet.control_images[i] = self.prepare_image(OV_df_unet.control_images[i], 512, 512, 1, 1, torch.device('cpu'), torch.float32, True, False)
+        for i in range(len(OV_df_pipe.control_images)):
+            OV_df_pipe.control_images[i] = self.prepare_image(OV_df_pipe.control_images[i], 512, 512, 1, 1, torch.device('cpu'), torch.float32, True, False)
         print('end self.prepare_image')
          
         print('end of activate')
         
 
     def deactivate(self):
-        del self.engine
+        del self.unet
 
 
         
@@ -1094,12 +1088,34 @@ class Script(scripts.Script):
                 if file.endswith('.safetensors') or file.endswith('.ckpt') or file.endswith('.pt'):
                     refiner_list.append(file)
             return refiner_list
+        
+        enable_ov_extension_status = gr.Textbox(label="enable", interactive=False, visible=False)
+        openvino_device_status = gr.Textbox(label="device", interactive=False, visible=False)
+        enable_caching_status = gr.Textbox(label="cache", interactive=False, visible=False) 
+        
+        def enable_ov_extension_handler(status):
+            print(f'change enable to {status}')
+            model_state.enable_ov_extension = status
 
+        def openvino_device_handler(status):
+            print(f'change enable to {status}')
+            model_state.device = status
+
+        def enable_caching_handler(status):
+            print(f'change enable to {status}')
+            model_state.enable_caching = status
+
+            
         with gr.Accordion('OV Extension', open=False):
             
-            enable_ov_extension = gr.Checkbox(label='check to enable OV extension', value=False)
-            openvino_device = gr.Dropdown(label="Select a device", choices=list(core.available_devices), value=model_state.device)
-            enable_caching = gr.Checkbox(label="Cache the compiled models on disk for faster model load in subsequent launches (Recommended)", value=True, elem_id=self.elem_id("enable_caching"))
+            enable_ov_extension= gr.Checkbox(label="Enable OpenVINO acceleration", value=False)
+            openvino_device = gr.Dropdown(label="Select a device", choices=list(core.available_devices), value="CPU")
+            enable_caching = gr.Checkbox(label="Cache the compiled models", value=False)
+
+            enable_ov_extension.change(fn=enable_ov_extension_handler, inputs=enable_ov_extension, outputs=enable_ov_extension_status)
+            openvino_device.change(fn=openvino_device_handler, inputs=openvino_device, outputs=openvino_device_status)
+            enable_caching.change(fn=enable_caching_handler, inputs=enable_caching, outputs=enable_caching_status)
+        
 
             
             
@@ -1472,14 +1488,14 @@ class Script(scripts.Script):
             return image
         def ov_cnet_forward(self,x, timesteps, context, y=None, **kwargs):
             print('ov_cnet forward called!@!!!!!!!!!!!')
-            print(x.shape, timesteps.shape, context.shape, y.shape if y else None, kwargs, len(OV_df_unet.control_images), OV_df_unet.control_images[0].shape ) # (952, 982, 3)
+            print(x.shape, timesteps.shape, context.shape, y.shape if y else None, kwargs, len(OV_df_pipe.control_images), OV_df_pipe.control_images[0].shape ) # (952, 982, 3)
             print('check shapes')
             
            
 
             
             
-            image = prepare_image(OV_df_unet.control_images[0], 512,512, 1, 1, 'cpu', 'fp32', False, False)
+            image = prepare_image(OV_df_pipe.control_images[0], 512,512, 1, 1, 'cpu', 'fp32', False, False)
 
             print('processed image shape:', image.shape) # torch.Size([1, 3, 512, 512])
             
@@ -1532,7 +1548,7 @@ class Script(scripts.Script):
 
             # 6.5 Optionally get Guidance Scale Embedding
             timestep_cond = None
-            if OV_df_unet.engine.config.time_cond_proj_dim is not None:
+            if OV_df_pipe.unet.config.time_cond_proj_dim is not None:
                 print('guidance scale')
                 guidance_scale_tensor = torch.tensor(self.guidance_scale - 1).repeat(batch_size * num_images_per_prompt)
                 timestep_cond = self.get_guidance_scale_embedding(
@@ -1542,8 +1558,8 @@ class Script(scripts.Script):
             
             
 
-            control_model = OV_df_unet.controlnet
-            control_model = torch.compile(OV_df_unet.controlnet, backend = 'openvino', options = opt)  # ControlNetModel.from_single_file('./extensions/sd-webui-controlnet/models/control_v11p_sd15_canny_fp16.safetensors', local_files_only=True)
+            control_model = OV_df_pipe.controlnet
+            control_model = torch.compile(OV_df_pipe.controlnet, backend = 'openvino', options = opt)  # ControlNetModel.from_single_file('./extensions/sd-webui-controlnet/models/control_v11p_sd15_canny_fp16.safetensors', local_files_only=True)
             down_block_res_samples, mid_block_res_sample = control_model(
                 x,
                 timesteps,
@@ -1554,11 +1570,9 @@ class Script(scripts.Script):
             )
             print([d.shape for d in down_block_res_samples], mid_block_res_sample.shape)
             print('check diffusers  controlnet output')
-            #import pdb; pdb.set_trace()
 
             
-            #OV_df_unet.engine = torch.compile(OV_df_unet.engine, backend = 'openvino')
-            noise_pred = OV_df_unet.engine(
+            noise_pred = OV_df_pipe.unet(
                     x,
                     timesteps,
                     context,
@@ -1604,6 +1618,8 @@ class Script(scripts.Script):
 
     def process(self, p, *args):
         print("[OV]ov process called")
+        print(model_state)
+        import pdb; pdb.set_trace()
         print(p.script_args)
         import sys
         import os
@@ -1612,19 +1628,22 @@ class Script(scripts.Script):
         print('current_extension_directory', current_extension_directory)
         sys.path.append(current_extension_directory)
         #from scripts.hook import UnetHook
+        print('p.extra_network_data:\n' ,p.extra_network_data)
+        print('p.extra_generation_params:\n', p.extra_generation_params)
 
-        enable_ov = args[0] != False and args[0] != 'False'
-        openvino_device = args[1] # device
-        enable_caching = args[2]
+        input('check p.extra_generation_params')
+
+        enable_ov = model_state.enable_ov_extension
+        openvino_device = model_state.device # device
+        enable_caching = model_state.enable_caching
 
         if not enable_ov:
             print('ov disabled, do nothing')
             return
         
         opt["device"] = str(openvino_device)
-        opt["model_caching"] = True 
+        opt["model_caching"] = True if enable_ov and enable_caching else False
         
-
         dir_path = "./model_cache" 
         if enable_caching:
             opt["cache_dir"] = dir_path
@@ -1639,10 +1658,10 @@ class Script(scripts.Script):
                 print(f"Directory '{dir_path}' does not exist.")
             
         
-        global OV_df_unet
-        #if OV_df_unet == None:
-        OV_df_unet = OVUnet(p.sd_model_name)
-        OV_df_unet.process = p
+        global OV_df_pipe
+        #if OV_df_pipe == None:
+        OV_df_pipe = OVUnet(p.sd_model_name)
+        OV_df_pipe.process = p
         self.apply_unet(p)
 
         
@@ -1666,10 +1685,7 @@ class Script(scripts.Script):
         
         
         print('ov enabled')
-        #print('sd_unet.current_unet_option',sd_unet.current_unet_option) # NOne
-        #print("current_unet:",sd_unet.current_unet)
         
-        #print("shared.opts:",shared.opts.data_labels)
         print("p.sd_model_name:",p.sd_model_name)
 
         #apply A1111 styled prompt weighting
@@ -1695,12 +1711,12 @@ class Script(scripts.Script):
             sd_unet.current_unet.deactivate()
         
         print("begin activate unet")
-        sd_unet.current_unet = OV_df_unet
+        sd_unet.current_unet = OV_df_pipe
 
         sd_ldm = p.sd_model
         unet = sd_ldm.model.diffusion_model
         print('force forward ')
-        unet.forward = OV_df_unet.forward
+        unet.forward = OV_df_pipe.forward
         print('finish force forward ')
         
         #sd_unet.current_unet.option = sd_unet_option
