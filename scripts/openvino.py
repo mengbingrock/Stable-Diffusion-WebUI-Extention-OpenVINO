@@ -70,6 +70,7 @@ from diffusers import (
     PNDMScheduler,
     AutoencoderKL,
 )
+
 from einops import rearrange
 import sys, shutil, os
 from modules import scripts
@@ -658,6 +659,9 @@ def get_control(
 
 
 from diffusers import DiffusionPipeline 
+from collections import defaultdict
+
+df_pipe = None
 class OVUnet(sd_unet.SdUnet):
     def __init__(self, model_name: str, *args, **kwargs):
         super().__init__()
@@ -667,9 +671,9 @@ class OVUnet(sd_unet.SdUnet):
         #self.configs = configs
 
         self.loaded_config = None
+        
+        self.lora_fused = defaultdict(bool)
 
-        self.engine_vram_req = 0
-        self.refitted_keys = set()
 
         self.unet = None
         self.controlnet = None
@@ -840,15 +844,13 @@ class OVUnet(sd_unet.SdUnet):
         state_dict = get_checkpoint_state_dict(checkpoint_info, timer)
         checkpoint_config = sd_models_config.find_checkpoint_config(state_dict, checkpoint_info)
         print("OpenVINO Extension:  created model from config : " + checkpoint_config)
-        pipe = StableDiffusionPipeline.from_single_file(checkpoint_path, original_config_file=checkpoint_config, use_safetensors=True, variant="fp32", dtype=torch.float32)
-        OV_df_pipe.unet = pipe.unet 
-        OV_df_pipe.vae = pipe.vae 
+        global df_pipe
+        df_pipe = StableDiffusionPipeline.from_single_file(checkpoint_path, original_config_file=checkpoint_config, use_safetensors=True, variant="fp32", dtype=torch.float32)
+        OV_df_pipe.unet = df_pipe.unet 
         OV_df_pipe.unet = torch.compile(OV_df_pipe.unet, backend="openvino", options = opt)
+        OV_df_pipe.vae = df_pipe.vae 
         print('OpenVINO Extension: loaded unet model')
             
-        #input('check p.extra generation params')
-        #if p.extra_generation_params:
-        print('controlnet detected')
 
         cn_model="None"
         control_models = []
@@ -1613,6 +1615,41 @@ class Script(scripts.Script):
         from ldm.modules.diffusionmodules.openaimodel import UNetModel
         
         model.forward = forward_webui.__get__(model, UNetModel)
+    
+    def after_extra_networks_activate(self, p,  *args, **kwargs):
+        
+        # https://huggingface.co/docs/diffusers/main/en/using-diffusers/merge_loras
+        #print(args) # (False, 'CPU', False)
+        if not model_state.enable_ov_extension: 
+            print('[OV] after_extra_networks_activate: not enabled, return ')
+            return
+        # p.extra_network_data['lora']) = 
+        # [<modules.extra_networks.ExtraNetworkParams object at 0x7fb6bae708b0>, <modules.extra_networks.ExtraNetworkParams object at 0x7fb6bb2bfc10>]
+        
+        names = []
+        scales = []
+        
+        for lora_param in p.extra_network_data['lora']:
+            name = lora_param.positional[0]
+            scale = float(lora_param.positional[1])
+            names.append(name)
+            scales.append(scale)
+        names.sort()
+        
+        if OV_df_pipe.lora_fused[''.join(names)] == True: return
+        OV_df_pipe.lora_fused[''.join(names)] = True
+
+        global df_pipe
+            
+        for name in names:
+            df_pipe.load_lora_weights(os.path.join(os.getcwd(), "models", "Lora"), weight_name=name + ".safetensors", adapter_name=name, low_cpu_mem_usage=True)
+
+        df_pipe.set_adapters(names, adapter_weights=scales)
+        
+        df_pipe.fuse_lora(adapter_names=names, lora_scale=1.0)
+        
+        df_pipe.unload_lora_weights()
+        
         
         
 
@@ -1628,10 +1665,14 @@ class Script(scripts.Script):
         print('current_extension_directory', current_extension_directory)
         sys.path.append(current_extension_directory)
         #from scripts.hook import UnetHook
-        print('p.extra_network_data:\n' ,p.extra_network_data)
-        print('p.extra_generation_params:\n', p.extra_generation_params)
+        print('[OV]p.extra_network_data:\n' ,p.extra_network_data)
+        print('[OV]p.extra_generation_params:\n', p.extra_generation_params)
+        print('[OV] modules.extra_networks.extra_network_registry:', modules.extra_networks.extra_network_registry)
 
-        input('check p.extra_generation_params')
+        input('[OV]check p.extra_generation_params')
+        import pdb; pdb.set_trace()
+
+        # lora: List: p.extra_network_data['lora']
 
         enable_ov = model_state.enable_ov_extension
         openvino_device = model_state.device # device
