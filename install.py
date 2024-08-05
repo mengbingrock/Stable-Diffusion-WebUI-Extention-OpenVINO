@@ -68,15 +68,8 @@ def install():
         launch.run_pip("install importlib_metadata", "importlib_metadata", live=True)
     from importlib_metadata import version
 
-    if launch.is_installed("openvino"):
-        if version("openvino") < "2023.2.0":
-            launch.run(
-                ["python", "-m", "pip", "uninstall", "-y", "openvino"],
-                "removing old version of openvino",
-            )
-
-    if not launch.is_installed("openvino"):
-        print("OpenVINO is not installed! Installing...")
+    if not launch.is_installed("openvino") or version("openvino") < "2023.2.0":
+        print("OpenVINO is not installed or less than min version! Installing...")
         launch.run_pip(
             "install openvino>=2023.2.0 --no-cache-dir", "openvino", live=True
         )
@@ -85,8 +78,10 @@ def install():
         launch.run_pip(
             "install diffusers>=0.23.0", "diffusers", live=True,
         )
-    launch.run_pip(
-            "install diffusers>=0.27.0", "diffusers", live=True,
+
+    if not launch.is_installed("peft"):
+        launch.run_pip(
+            "install peft>=0.12.0", "peft", live=True,
         )
 
     xformers_package = os.environ.get('XFORMERS_PACKAGE', 'xformers==0.0.20')

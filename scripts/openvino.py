@@ -758,18 +758,16 @@ class OVUnet(sd_unet.SdUnet):
             print('check diffusers  controlnet output')
         else:
             print('no controlnet detected')
-            #import pdb; pdb.set_trace()
 
         
-        #OV_df_pipe.unet = torch.compile(OV_df_pipe.unet, backend = 'openvino', options = opt); print('[OV] torch.compile unet')
         noise_pred = OV_df_pipe.unet(
-                x,
-                timesteps,
-                context,
+                x.to(model_state.device.lower()),
+                timesteps.to(model_state.device.lower()),
+                context.to(model_state.device.lower()),
                 #timestep_cond=timestep_cond,
                 #cross_attention_kwargs=({}),
-                down_block_additional_residuals=down_block_res_samples,
-                mid_block_additional_residual=mid_block_res_sample,
+                down_block_additional_residuals=down_block_res_samples.to(model_state.device.lower()) if down_block_res_samples else None,
+                mid_block_additional_residual=mid_block_res_sample.to(model_state.device.lower()) if mid_block_res_sample else None,
                 #added_cond_kwargs=({}), #added_cond_kwargs,
                 #return_dict=False,
                 ).sample
@@ -846,9 +844,9 @@ class OVUnet(sd_unet.SdUnet):
         print("OpenVINO Extension:  created model from config : " + checkpoint_config)
         global df_pipe
         df_pipe = StableDiffusionPipeline.from_single_file(checkpoint_path, original_config_file=checkpoint_config, use_safetensors=True, variant="fp32", dtype=torch.float32)
-        OV_df_pipe.unet = df_pipe.unet 
+        OV_df_pipe.unet = df_pipe.unet.to(model_state.device.lower())
         OV_df_pipe.unet = torch.compile(OV_df_pipe.unet, backend="openvino", options = opt)
-        OV_df_pipe.vae = df_pipe.vae 
+        OV_df_pipe.vae = df_pipe.vae.to(model_state.device.lower())
         print('OpenVINO Extension: loaded unet model')
             
 
@@ -1111,7 +1109,7 @@ class Script(scripts.Script):
         with gr.Accordion('OV Extension', open=False):
             
             enable_ov_extension= gr.Checkbox(label="Enable OpenVINO acceleration", value=False)
-            openvino_device = gr.Dropdown(label="Select a device", choices=list(core.available_devices), value="CPU")
+            openvino_device = gr.Dropdown(label="Select a device", choices=list(core.available_devices), value = 'CPU')
             enable_caching = gr.Checkbox(label="Cache the compiled models", value=False)
 
             enable_ov_extension.change(fn=enable_ov_extension_handler, inputs=enable_ov_extension, outputs=enable_ov_extension_status)
@@ -1655,8 +1653,6 @@ class Script(scripts.Script):
 
     def process(self, p, *args):
         print("[OV]ov process called")
-        print(model_state)
-        import pdb; pdb.set_trace()
         print(p.script_args)
         import sys
         import os
@@ -1669,8 +1665,6 @@ class Script(scripts.Script):
         print('[OV]p.extra_generation_params:\n', p.extra_generation_params)
         print('[OV] modules.extra_networks.extra_network_registry:', modules.extra_networks.extra_network_registry)
 
-        input('[OV]check p.extra_generation_params')
-        import pdb; pdb.set_trace()
 
         # lora: List: p.extra_network_data['lora']
 
@@ -1682,28 +1676,42 @@ class Script(scripts.Script):
             print('ov disabled, do nothing')
             return
         
-        opt["device"] = str(openvino_device)
-        opt["model_caching"] = True if enable_ov and enable_caching else False
+        global opt
+        opt_new = dict()
+        opt_new["device"] = str(openvino_device).upper()
+        opt_new["model_caching"] = True if enable_ov and enable_caching else False
         
         dir_path = "./model_cache" 
         if enable_caching:
-            opt["cache_dir"] = dir_path
-        else:
-            if "cache_dir" in opt: del opt["cache_dir"] 
+            opt_new["cache_dir"] = dir_path
+            os.makedirs(dir_path, exist_ok=True)
             
+        else:
+            if "cache_dir" in opt_new: del opt_new["cache_dir"]
             if os.path.exists(dir_path) and os.path.isdir(dir_path):
-                # Remove the directory and its contents
                 shutil.rmtree(dir_path)
                 print(f"Directory '{dir_path}' and its contents have been removed.")
             else:
                 print(f"Directory '{dir_path}' does not exist.")
-            
         
+        print('opt:', opt_new)
+        if opt_new != opt:
+            model_state.recompile = True
+        else:
+            model_state.recompile = False
+        opt = opt_new
         global OV_df_pipe
-        #if OV_df_pipe == None:
-        OV_df_pipe = OVUnet(p.sd_model_name)
-        OV_df_pipe.process = p
-        self.apply_unet(p)
+            
+        if OV_df_pipe == None:
+            print('OV_df_pipe is None, create new')
+            OV_df_pipe = OVUnet(p.sd_model_name)
+            OV_df_pipe.process = p
+            self.apply_unet(p)
+        elif model_state.recompile:
+            print('reuse model weights but recompile due to opts change')
+            self.apply_unet(p)
+        else:
+            print('reuse OV_df_pipe, no recompile')
 
         
         from modules.sd_vae import vae_dict, base_vae, loaded_vae_file # loaded_vae_file: /Users/mengbing/WorkSync/Git/stable-diffusion-webui-openVINO/models/VAE/vaeFtMse840000EmaPruned_vae.safetensors
@@ -1741,14 +1749,8 @@ class Script(scripts.Script):
         else:
             print('no cnet, do nothing')
         '''
-        
-        print('finished process')
-        
-                
-        
     def apply_unet(self, p):
         if sd_unet.current_unet is not None:
-            #print("Deactivating unet: ", sd_unet.current_unet)
             sd_unet.current_unet.deactivate()
         
         print("begin activate unet")
@@ -1759,9 +1761,4 @@ class Script(scripts.Script):
         print('force forward ')
         unet.forward = OV_df_pipe.forward
         print('finish force forward ')
-        
-        #sd_unet.current_unet.option = sd_unet_option
-        #sd_unet.current_unet_option = sd_unet_option
-
-        #print(f"Activating unet: {sd_unet.current_unet.option.label}")
         sd_unet.current_unet.activate(p)
