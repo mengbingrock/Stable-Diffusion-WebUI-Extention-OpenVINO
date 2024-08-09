@@ -718,16 +718,98 @@ class OVUnet(sd_unet.SdUnet):
     
     
     def forward(self, x, timesteps=None, context=None, y=None, **kwargs):
+
+        print('[OV] forward called, x: min(x), max(x)', torch.min(x), torch.max(x))
+        if y is not None:
+            print('sd-xl detected')
+            prompt = self.process.prompt
+            negative_prompt = self.process.negative_prompt
+            device = df_pipe._execution_device
+            lora_scale = None #(
+            #df_pipe.cross_attention_kwargs.get("scale", None) if df_pipe.cross_attention_kwargs is not None else None
+            #)
+            # 2. Define call parameters
+            if prompt is not None and isinstance(prompt, str):
+                batch_size = 1
+            elif prompt is not None and isinstance(prompt, list):
+                batch_size = len(prompt)
+            else:
+                batch_size = prompt_embeds.shape[0]
+            
+            num_images_per_prompt = kwargs.get("num_images_per_prompt", 1)
+            
+            (
+                prompt_embeds,
+                negative_prompt_embeds,
+                pooled_prompt_embeds,
+                negative_pooled_prompt_embeds,
+            ) = df_pipe.encode_prompt(
+                prompt=prompt,
+                prompt_2=None,
+                device=device,
+                num_images_per_prompt=num_images_per_prompt,
+                do_classifier_free_guidance=True, #df_pipe.do_classifier_free_guidance,
+                negative_prompt=negative_prompt,
+                negative_prompt_2=None,
+                prompt_embeds=None, #prompt_embeds,
+                negative_prompt_embeds=None, #negative_prompt_embeds,
+                pooled_prompt_embeds=None, #pooled_prompt_embeds,
+                negative_pooled_prompt_embeds=None, #negative_pooled_prompt_embeds,
+                lora_scale=lora_scale,
+                clip_skip=None,#df_pipe.clip_skip,
+            )
+
+            
+            # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
+            #extra_step_kwargs = df_pipe.prepare_extra_step_kwargs(generator, eta)
+
+            # 7. Prepare added time ids & embeddings
+            add_text_embeds = pooled_prompt_embeds
+            if df_pipe.text_encoder_2 is None:
+                text_encoder_projection_dim = int(pooled_prompt_embeds.shape[-1])
+            else:
+                text_encoder_projection_dim = df_pipe.text_encoder_2.config.projection_dim
+
+            add_time_ids = df_pipe._get_add_time_ids(
+                (1024, 1024),#original_size,
+                (0,0),#crops_coords_top_left,
+                (1024,1024), #target_size,
+                dtype=prompt_embeds.dtype,
+                text_encoder_projection_dim=text_encoder_projection_dim,
+            )
+            negative_target_size = kwargs.get("negative_target_size", None)
+            negative_original_size = kwargs.get("negative_original_size", None)
+            if negative_original_size is not None and negative_target_size is not None:
+                negative_add_time_ids = self._get_add_time_ids(
+                    negative_original_size,
+                    negative_crops_coords_top_left,
+                    negative_target_size,
+                    dtype=prompt_embeds.dtype,
+                    text_encoder_projection_dim=text_encoder_projection_dim,
+                )
+            else:
+                negative_add_time_ids = add_time_ids
+
+            if True: #df_pipe.do_classifier_free_guidance:
+                prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
+                add_text_embeds = torch.cat([negative_pooled_prompt_embeds, add_text_embeds], dim=0)
+                add_time_ids = torch.cat([negative_add_time_ids, add_time_ids], dim=0)
+
+            prompt_embeds = prompt_embeds.to(device)
+            add_text_embeds = add_text_embeds.to(device)
+            add_time_ids = add_time_ids.to(device).repeat(batch_size * num_images_per_prompt, 1)
+                
+            # predict the noise residual
+            added_cond_kwargs = {"text_embeds": add_text_embeds, "time_ids": add_time_ids}
+            
+        else:
+            print('sd 1.5 detected')
+            added_cond_kwargs = {}
         
         down_block_res_samples, mid_block_res_sample = None, None 
-        print('timesteps:', timesteps)
-        print('x: min(x), max(x)', torch.min(x), torch.max(x))
-
         if self.has_controlnet:
             print('controlnet detected')
             cond_mark, self.current_uc_indices, self.current_c_indices, context = unmark_prompt_context(context)
-
-            
             control_model = OV_df_pipe.controlnet
             image = OV_df_pipe.control_images[0]
             print('image min and max:', torch.min(image), torch.max(image))
@@ -758,25 +840,22 @@ class OVUnet(sd_unet.SdUnet):
             print('check diffusers  controlnet output')
         else:
             print('no controlnet detected')
-
         
         noise_pred = OV_df_pipe.unet(
                 x.to(model_state.device.lower()),
                 timesteps.to(model_state.device.lower()),
                 context.to(model_state.device.lower()),
+                class_labels = y, # sd-xl class_labels
                 #timestep_cond=timestep_cond,
                 #cross_attention_kwargs=({}),
+                added_cond_kwargs=added_cond_kwargs,
                 down_block_additional_residuals=down_block_res_samples.to(model_state.device.lower()) if down_block_res_samples else None,
                 mid_block_additional_residual=mid_block_res_sample.to(model_state.device.lower()) if mid_block_res_sample else None,
-                #added_cond_kwargs=({}), #added_cond_kwargs,
                 #return_dict=False,
                 ).sample
 
-        
         return noise_pred
     
-    
-
     def apply_loras(self, refit_dict: dict):
         if not self.refitted_keys.issubset(set(refit_dict.keys())):
             # Need to ensure that weights that have been modified before and are not present anymore are reset.
@@ -843,9 +922,14 @@ class OVUnet(sd_unet.SdUnet):
         checkpoint_config = sd_models_config.find_checkpoint_config(state_dict, checkpoint_info)
         print("OpenVINO Extension:  created model from config : " + checkpoint_config)
         global df_pipe
-        df_pipe = StableDiffusionPipeline.from_single_file(checkpoint_path, original_config_file=checkpoint_config, use_safetensors=True, variant="fp32", dtype=torch.float32)
+        if 'xl' not in checkpoint_config:
+            print('load sd1 or sd2 pipeline')
+            df_pipe = StableDiffusionPipeline.from_single_file(checkpoint_path, original_config_file=checkpoint_config, use_safetensors=True, variant="fp32", dtype=torch.float32)
+        else:
+            print('load sd-xl pipeline')
+            df_pipe = StableDiffusionXLPipeline.from_single_file(checkpoint_path, original_config_file=checkpoint_config, use_safetensors=True, variant="fp32", dtype=torch.float32)
         OV_df_pipe.unet = df_pipe.unet.to(model_state.device.lower())
-        OV_df_pipe.unet = torch.compile(OV_df_pipe.unet, backend="openvino", options = opt)
+        #OV_df_pipe.unet = torch.compile(OV_df_pipe.unet, backend="openvino", options = opt)
         OV_df_pipe.vae = df_pipe.vae.to(model_state.device.lower())
         print('OpenVINO Extension: loaded unet model')
             
