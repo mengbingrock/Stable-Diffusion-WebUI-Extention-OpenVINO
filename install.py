@@ -2,7 +2,9 @@ import launch
 import sys
 import os
 import shutil
-
+import subprocess
+from importlib import metadata
+from packaging.version import parse
 
 dir_repos = "repositories"
 script_path = os.path.dirname(os.path.abspath(__file__))
@@ -62,73 +64,70 @@ def git_clone(url, dir, name, commithash=None):
     if commithash is not None:
         launch.run(f'"{git}" -C "{dir}" checkout {commithash}', None, "Couldn't checkout {name}'s hash: {commithash}")
 
+def get_installed_version(package: str):
+    try:
+        return metadata.version(package)
+    except Exception:
+        return None
+
+def extract_base_package(package_string: str) -> str:
+    base_package = package_string.split("@git")[0]
+    return base_package
+
+def install_requirements(file_path='requirements.txt'):
+    try:
+        # Read the requirements file
+        with open(file_path, 'r') as file:
+            requirements = file.read().splitlines()
+
+        # Install each requirement
+        for requirement in requirements:
+            package = requirement.strip()
+            if "==" in package:
+                package_name, package_version = package.split("==")
+                installed_version = get_installed_version(package_name)
+                if installed_version != package_version:
+                    launch.run_pip(
+                        f'install -U "{package}"',
+                        f"openvino extension requirement: changing {package_name} version from {installed_version} to {package_version}",
+                    )
+            elif ">=" in package:
+                package_name, package_version = package.split(">=")
+                installed_version = get_installed_version(package_name)
+                if not installed_version or parse(
+                    installed_version
+                ) < parse(package_version):
+                    launch.run_pip(
+                        f'install -U "{package}"',
+                        f"openvino extension  requirement: changing {package_name} version from {installed_version} to {package_version}",
+                    )
+            elif "<=" in package:
+                package_name, package_version = package.split("<=")
+                installed_version = get_installed_version(package_name)
+                if not installed_version or parse(
+                    installed_version
+                ) > parse(package_version):
+                    launch.run_pip(
+                        f'install "{package_name}=={package_version}"',
+                        f"openvino extension  requirement: changing {package_name} version from {installed_version} to {package_version}",
+                    )
+            elif not launch.is_installed(extract_base_package(package)):
+                launch.run_pip(
+                    f'install "{package}"',
+                    f"openvino extension  requirement: {package}",
+                )
+            
+        
+        print("OpenVINO extension: All requirements installed successfully.")
+    except FileNotFoundError:
+        print(f"Error: {file_path} not found.")
+    except Exception as e:
+        print(e)
+        print(f"Warning: Failed to install {package}, some preprocessors may not work.")
 
 def install():
-    if not launch.is_installed("importlib_metadata"):
-        launch.run_pip("install importlib_metadata", "importlib_metadata", live=True)
-    from importlib_metadata import version
 
-    if not launch.is_installed("openvino") or version("openvino") < "2023.2.0":
-        print("OpenVINO is not installed or less than min version! Installing...")
-        launch.run_pip(
-            "install openvino>=2023.2.0 --no-cache-dir", "openvino", live=True
-        )
-
-    if not launch.is_installed("diffusers"):
-        launch.run_pip(
-            "install diffusers>=0.23.0", "diffusers", live=True,
-        )
-
-    if not launch.is_installed("peft"):
-        launch.run_pip(
-            "install peft>=0.12.0", "peft", live=True,
-        )
-
-    xformers_package = os.environ.get('XFORMERS_PACKAGE', 'xformers==0.0.20')
-    clip_package = os.environ.get('CLIP_PACKAGE', "https://github.com/openai/CLIP/archive/d50d76daa670286dd6cacf3bcd80b5e4823fc8e1.zip")
-    openclip_package = os.environ.get('OPENCLIP_PACKAGE', "https://github.com/mlfoundations/open_clip/archive/bb6e834e9c70d9c27d0dc3ecedeebeaeb1ffad6b.zip")
-
-    stable_diffusion_repo = os.environ.get('STABLE_DIFFUSION_REPO', "https://github.com/Stability-AI/stablediffusion.git")
-    stable_diffusion_xl_repo = os.environ.get('STABLE_DIFFUSION_XL_REPO', "https://github.com/Stability-AI/generative-models.git")
-    k_diffusion_repo = os.environ.get('K_DIFFUSION_REPO', 'https://github.com/crowsonkb/k-diffusion.git')
-    codeformer_repo = os.environ.get('CODEFORMER_REPO', 'https://github.com/sczhou/CodeFormer.git')
-    blip_repo = os.environ.get('BLIP_REPO', 'https://github.com/salesforce/BLIP.git')
-
-    stable_diffusion_commit_hash = os.environ.get('STABLE_DIFFUSION_COMMIT_HASH', "cf1d67a6fd5ea1aa600c4df58e5b47da45f6bdbf")
-    stable_diffusion_xl_commit_hash = os.environ.get('STABLE_DIFFUSION_XL_COMMIT_HASH', "45c443b316737a4ab6e40413d7794a7f5657c19f")
-    k_diffusion_commit_hash = os.environ.get('K_DIFFUSION_COMMIT_HASH', "ab527a9a6d347f364e3d185ba6d714e22d80cb3c")
-    codeformer_commit_hash = os.environ.get('CODEFORMER_COMMIT_HASH', "c5b4593074ba6214284d6acd5f1719b6c5d739af")
-    blip_commit_hash = os.environ.get('BLIP_COMMIT_HASH', "48211a1594f1321b00f14c9f7a5b4813144b2fb9")
-
-    '''
-    if not launch.is_installed("clip"):
-        launch.run_pip(
-            f"install {clip_package}", "clip"
-        ) 
-
-    if not launch.is_installed("open_clip"):
-        launch.run_pip(
-            f"install {openclip_package}", "clip"
-        )
-    '''
-
-    os.makedirs(os.path.join(script_path, dir_repos), exist_ok=True)
-    #git_clone(stable_diffusion_repo, repo_dir('stable-diffusion-stability-ai'), "Stable Diffusion", stable_diffusion_commit_hash)
-    #git_clone(stable_diffusion_xl_repo, repo_dir('generative-models'), "Stable Diffusion XL", stable_diffusion_xl_commit_hash)
-    #git_clone(k_diffusion_repo, repo_dir('k-diffusion'), "K-diffusion", k_diffusion_commit_hash)
-    #git_clone(codeformer_repo, repo_dir('CodeFormer'), "CodeFormer", codeformer_commit_hash)
-    #git_clone(blip_repo, repo_dir('BLIP'), "BLIP", blip_commit_hash)
-    
-
-
-
-    '''
-    if not launch.is_installed("lpips"):
-        print("CodeFormer is not installed! Installing...")
-        launch.run_pip(
-            f"install -r \"{os.path.join(repo_dir('CodeFormer'), 'requirements.txt')}\"", "requirements for CodeFormer"
-        )
-    '''
+    install_requirements()
     
     print("OpenVINO extension install complete")
 
