@@ -929,7 +929,7 @@ class OVUnet(sd_unet.SdUnet):
             print('load sd-xl pipeline')
             df_pipe = StableDiffusionXLPipeline.from_single_file(checkpoint_path, original_config_file=checkpoint_config, use_safetensors=True, variant="fp32", dtype=torch.float32)
         OV_df_pipe.unet = df_pipe.unet.to(model_state.device.lower())
-        #OV_df_pipe.unet = torch.compile(OV_df_pipe.unet, backend="openvino", options = opt)
+        OV_df_pipe.unet = torch.compile(OV_df_pipe.unet, backend="openvino", options = opt)
         OV_df_pipe.vae = df_pipe.vae.to(model_state.device.lower())
         print('OpenVINO Extension: loaded unet model')
             
