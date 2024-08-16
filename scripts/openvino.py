@@ -13,10 +13,10 @@ import numpy as np
 import sys
 from typing import Dict, Optional, Tuple, List
 
-
 import modules
 import modules.paths as paths
 import modules.scripts as scripts
+from modules import scripts
 
 from modules import processing, sd_unet
 
@@ -842,15 +842,15 @@ class OVUnet(sd_unet.SdUnet):
             print('no controlnet detected')
         
         noise_pred = OV_df_pipe.unet(
-                x.to(model_state.device.lower()),
-                timesteps.to(model_state.device.lower()),
-                context.to(model_state.device.lower()),
+                x,
+                timesteps,
+                context,
                 class_labels = y, # sd-xl class_labels
                 #timestep_cond=timestep_cond,
                 #cross_attention_kwargs=({}),
                 added_cond_kwargs=added_cond_kwargs,
-                down_block_additional_residuals=down_block_res_samples.to(model_state.device.lower()) if down_block_res_samples else None,
-                mid_block_additional_residual=mid_block_res_sample.to(model_state.device.lower()) if mid_block_res_sample else None,
+                down_block_additional_residuals=down_block_res_samples,
+                mid_block_additional_residual=mid_block_res_sample, 
                 #return_dict=False,
                 ).sample
 
@@ -928,9 +928,9 @@ class OVUnet(sd_unet.SdUnet):
         else:
             print('load sd-xl pipeline')
             df_pipe = StableDiffusionXLPipeline.from_single_file(checkpoint_path, original_config_file=checkpoint_config, use_safetensors=True, variant="fp32", dtype=torch.float32)
-        OV_df_pipe.unet = df_pipe.unet.to(model_state.device.lower())
+        OV_df_pipe.unet = df_pipe.unet.to("cpu") # OV device should only be in the options for torch.compile
         OV_df_pipe.unet = torch.compile(OV_df_pipe.unet, backend="openvino", options = opt)
-        OV_df_pipe.vae = df_pipe.vae.to(model_state.device.lower())
+        OV_df_pipe.vae = df_pipe.vae.to("cpu")
         print('OpenVINO Extension: loaded unet model')
             
 
@@ -950,7 +950,6 @@ class OVUnet(sd_unet.SdUnet):
                 unit = param
                 preprocessor = Preprocessor.get_preprocessor(unit.module)
                 print('preprocessor:', preprocessor)
-                input('check preprocessor')
                 
                 
                 if unit.ipadapter_input is not None:
@@ -1006,6 +1005,7 @@ class OVUnet(sd_unet.SdUnet):
                 cn_model_path = cn_model_path + '.safetensors'
             elif os.path.isfile(cn_model_path + '.pth'):
                 cn_model_path = cn_model_path + '.pth'
+
             controlnet = ControlNetModel.from_single_file(cn_model_path, local_files_only=True)
             OV_df_pipe.controlnet = controlnet
         
@@ -1737,9 +1737,7 @@ class Script(scripts.Script):
 
     def process(self, p, *args):
         print("[OV]ov process called")
-        print(p.script_args)
-        import sys
-        import os
+        
         from modules import scripts
         current_extension_directory = scripts.basedir() + '/extensions/sd-webui-controlnet/scripts'
         print('current_extension_directory', current_extension_directory)
@@ -1762,7 +1760,7 @@ class Script(scripts.Script):
         
         global opt
         opt_new = dict()
-        opt_new["device"] = str(openvino_device).upper()
+        opt_new["device"] = openvino_device.upper()
         opt_new["model_caching"] = True if enable_ov and enable_caching else False
         
         dir_path = "./model_cache" 
