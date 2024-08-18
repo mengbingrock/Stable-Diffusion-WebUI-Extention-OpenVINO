@@ -33,6 +33,7 @@ from PIL import Image, ImageOps
 from types import MappingProxyType
 from typing import Optional
 
+import openvino
 from openvino.frontend import FrontEndManager
 from openvino.frontend.pytorch.fx_decoder import TorchFXPythonDecoder
 from openvino.frontend.pytorch.torchdynamo import backend # noqa: F401
