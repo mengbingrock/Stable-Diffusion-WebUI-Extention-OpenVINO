@@ -10,13 +10,13 @@ import functools
 import gradio as gr
 from modules.ui import plaintext_to_html
 import numpy as np
-import sys
+import sys, gc
 from typing import Dict, Optional, Tuple, List
 
 import modules
 import modules.paths as paths
 import modules.scripts as scripts
-from modules import scripts
+from modules import scripts, script_callbacks
 
 from modules import processing, sd_unet
 
@@ -34,6 +34,7 @@ from PIL import Image, ImageOps
 from types import MappingProxyType
 from typing import Optional
 
+import openvino
 from openvino.frontend import FrontEndManager
 from openvino.frontend.pytorch.fx_decoder import TorchFXPythonDecoder
 from openvino.frontend.pytorch.torchdynamo import backend # noqa: F401
@@ -906,7 +907,31 @@ class OVUnet(sd_unet.SdUnet):
 
         return image
 
-    def activate(self, p):
+    def activate(self, p, checkpoint = None):
+
+        print('[OV]unload the already loaded unet')
+        from modules.sd_models import model_data, send_model_to_trash
+        
+        
+        global df_pipe, OV_df_pipe
+        if model_data.sd_model:
+            #send_model_to_trash(model_data.sd_model)
+            #model_data.sd_model = None
+            model_data.sd_model.state_dict().clear()
+            devices.torch_gc()
+            print('[OV] finished unloading model')
+        
+        '''
+        if OV_df_pipe is not None:
+            del OV_df_pipe
+            del df_pipe
+            gc.collect()
+            OV_df_pipe = None
+            df_pipe = None
+            print('del old OV_df_pipe and df_pipe')
+        '''
+        
+        
         #self.loaded_config = self.configs[self.profile_idx]
         # model state
         #### controlnet ####
@@ -914,14 +939,13 @@ class OVUnet(sd_unet.SdUnet):
 
         
         print('loading OV unet model')
-        checkpoint_name = shared.opts.sd_model_checkpoint.split(" ")[0]
+        checkpoint_name = checkpoint or shared.opts.sd_model_checkpoint.split(" ")[0]
         checkpoint_path = os.path.join(scripts.basedir(), 'models', 'Stable-diffusion', checkpoint_name)
         checkpoint_info = CheckpointInfo(checkpoint_path)
         timer = Timer()
         state_dict = get_checkpoint_state_dict(checkpoint_info, timer)
         checkpoint_config = sd_models_config.find_checkpoint_config(state_dict, checkpoint_info)
         print("OpenVINO Extension:  created model from config : " + checkpoint_config)
-        global df_pipe
         if 'xl' not in checkpoint_config:
             print('load sd1 or sd2 pipeline')
             df_pipe = StableDiffusionPipeline.from_single_file(checkpoint_path, original_config_file=checkpoint_config, use_safetensors=True, variant="fp32", dtype=torch.float32)
@@ -1737,6 +1761,8 @@ class Script(scripts.Script):
 
     def process(self, p, *args):
         print("[OV]ov process called")
+        import pdb; pdb.set_trace()
+        model_state.refiner_ckpt = p.refiner_checkpoint
         
         from modules import scripts
         current_extension_directory = scripts.basedir() + '/extensions/sd-webui-controlnet/scripts'
@@ -1782,7 +1808,13 @@ class Script(scripts.Script):
         else:
             model_state.recompile = False
         opt = opt_new
-        global OV_df_pipe
+        global OV_df_pipe, df_pipe
+        if OV_df_pipe: del OV_df_pipe
+        if df_pipe: del df_pipe
+        gc.collect()
+        OV_df_pipe = None
+        df_pipe = None
+        
             
         if OV_df_pipe == None:
             print('OV_df_pipe is None, create new')
@@ -1840,7 +1872,25 @@ class Script(scripts.Script):
 
         sd_ldm = p.sd_model
         unet = sd_ldm.model.diffusion_model
+        #for param in unet.parameters():
+        #    param.data = None
         print('force forward ')
         unet.forward = OV_df_pipe.forward
         print('finish force forward ')
         sd_unet.current_unet.activate(p)
+
+
+def refiner_cb_fn(args):
+    
+    print('openvino_cb_fn called')
+    print('openvino_cb_fn: enable refiner')
+    print('OV_df_pipe.process.extra_generation_params[Refiner]', OV_df_pipe.process.extra_generation_params['Refiner'] if OV_df_pipe else None)
+    print('OV_df_pipe.process.extra_generation_params[Refiner switch at]', OV_df_pipe.process.extra_generation_params['Refiner switch at'] if OV_df_pipe else None)
+    import pdb; pdb.set_trace()
+
+    if model_state.enable_ov_extension and OV_df_pipe and OV_df_pipe.process.extra_generation_params.get('Refiner', False):
+        refiner_filename = model_state.refiner_ckpt.split(' ')[0]
+        print('[OV] reload refiner checkpoint:',refiner_filename)
+        OV_df_pipe.activate(OV_df_pipe.process, refiner_filename)
+        
+script_callbacks.on_model_loaded(refiner_cb_fn, name=None)
