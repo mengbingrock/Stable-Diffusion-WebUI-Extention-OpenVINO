@@ -459,8 +459,9 @@ def set_numpy_seed(p: processing.StableDiffusionProcessing) -> Optional[int]:
     with 0xFFFFFFFF to ensure it fits within a 32-bit integer.
     """
     try:
-        tmp_seed = int(p.all_seeds[0] if p.seed == -1 else max(int(p.seed), 0))
-        tmp_subseed = int(p.all_seeds[0] if p.subseed == -1 else max(int(p.subseed), 0))
+        # to do: fix multiple seeds in x y z plot or prompt matrix
+        tmp_seed = int(p.all_seeds[0]) # if len(p.seed) == 1 and p.seed == -1 else max((p.seed), 0))
+        tmp_subseed = int(p.all_seeds[0]) # if len(p.subseed) == 1 and p.subseed == -1 else max((p.subseed), 0))
         seed = (tmp_seed + tmp_subseed) & 0xFFFFFFFF
         np.random.seed(seed)
         return seed
@@ -957,7 +958,7 @@ class OVUnet(sd_unet.SdUnet):
         OV_df_pipe.vae = df_pipe.vae.to("cpu")
         print('OpenVINO Extension: loaded unet model')
             
-
+        self.has_controlnet = False
         cn_model="None"
         control_models = []
         control_images = []
@@ -1030,7 +1031,7 @@ class OVUnet(sd_unet.SdUnet):
             elif os.path.isfile(cn_model_path + '.pth'):
                 cn_model_path = cn_model_path + '.pth'
 
-            controlnet = ControlNetModel.from_single_file(cn_model_path, local_files_only=True)
+            controlnet = ControlNetModel.from_single_file(cn_model_path, local_files_only=False)
             OV_df_pipe.controlnet = controlnet
         
         # process image
@@ -1038,7 +1039,6 @@ class OVUnet(sd_unet.SdUnet):
         for i in range(len(OV_df_pipe.control_images)):
             OV_df_pipe.control_images[i] = self.prepare_image(OV_df_pipe.control_images[i], 512, 512, 1, 1, torch.device('cpu'), torch.float32, True, False)
         print('end self.prepare_image')
-         
         print('end of activate')
         
 
@@ -1761,7 +1761,7 @@ class Script(scripts.Script):
 
     def process(self, p, *args):
         print("[OV]ov process called")
-        import pdb; pdb.set_trace()
+        #import pdb; pdb.set_trace()
         model_state.refiner_ckpt = p.refiner_checkpoint
         
         from modules import scripts
@@ -1809,11 +1809,12 @@ class Script(scripts.Script):
             model_state.recompile = False
         opt = opt_new
         global OV_df_pipe, df_pipe
-        if OV_df_pipe: del OV_df_pipe
+
+        '''if OV_df_pipe: del OV_df_pipe
         if df_pipe: del df_pipe
         gc.collect()
         OV_df_pipe = None
-        df_pipe = None
+        df_pipe = None'''
         
             
         if OV_df_pipe == None:
@@ -1884,9 +1885,9 @@ def refiner_cb_fn(args):
     
     print('openvino_cb_fn called')
     print('openvino_cb_fn: enable refiner')
-    print('OV_df_pipe.process.extra_generation_params[Refiner]', OV_df_pipe.process.extra_generation_params['Refiner'] if OV_df_pipe else None)
-    print('OV_df_pipe.process.extra_generation_params[Refiner switch at]', OV_df_pipe.process.extra_generation_params['Refiner switch at'] if OV_df_pipe else None)
-    import pdb; pdb.set_trace()
+    print('OV_df_pipe.process.extra_generation_params[Refiner]', OV_df_pipe.process.extra_generation_params.get('Refiner', None) if OV_df_pipe else None)
+    print('OV_df_pipe.process.extra_generation_params[Refiner switch at]', OV_df_pipe.process.extra_generation_params.get('Refiner switch at',None) if OV_df_pipe else None)
+    # import pdb; pdb.set_trace()
 
     if model_state.enable_ov_extension and OV_df_pipe and OV_df_pipe.process.extra_generation_params.get('Refiner', False):
         refiner_filename = model_state.refiner_ckpt.split(' ')[0]
